@@ -12,7 +12,7 @@ Environment:
   MEMBER_SKILL_URL     default: http://127.0.0.1:8787/api/run
   MEMBER_SKILL_LICENSE optional fallback license token
   MEMBER_SKILL_CLIENT  default: openclaw
-  MEMBER_RESPONSE_MODE default: summary
+  MEMBER_RESPONSE_MODE default: rich
 """
 
 from __future__ import annotations
@@ -181,6 +181,7 @@ def main() -> int:
     parser.add_argument("--input", default=None, help="User request")
     parser.add_argument("--raw", action="store_true", help="Print raw backend JSON instead of compact output")
     parser.add_argument("--summary", action="store_true", help="Prefer a short organized handoff summary")
+    parser.add_argument("--rich", action="store_true", help="Prefer a richer, more detailed handoff")
     args = parser.parse_args()
 
     stdin_text = _read_stdin()
@@ -190,6 +191,10 @@ def main() -> int:
         payload["response_mode"] = "raw"
     elif args.summary:
         payload["response_mode"] = "summary"
+    elif args.rich:
+        payload["response_mode"] = "rich"
+    else:
+        payload["response_mode"] = "rich"
 
     result = _post(args.url, payload)
     return _render_response(result)

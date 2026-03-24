@@ -41,8 +41,8 @@ Or pipe JSON on stdin:
 
 - Uses UTF-8 end-to-end.
 - Reads license from CLI arg, env, or stdin JSON.
-- Can request `compact`, `summary`, or `raw` response modes.
-- Default is `summary`, so the backend response is auto-organized into a clean handoff.
+- Can request `compact`, `summary`, `rich`, or `raw` response modes.
+- Default is `rich`, so the backend response is more detailed and suitable for handing to the user.
 - Auto-extracts common answer fields and prints a clean handoff.
 - If the backend returns 403, reports membership check failure.
 - Does not store the large prompt locally.
