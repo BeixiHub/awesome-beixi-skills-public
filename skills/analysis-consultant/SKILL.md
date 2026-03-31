@@ -20,20 +20,20 @@ Send this payload to the backend:
 ## Usage
 
 ```powershell
-python .\skills\analysis-consultant\openclaw_adapter.py --license "eyJ2IjoxLCJwcm9kdWN0IjoibWVtYmVyLXNraWxsLWRlbW8iLCJlbWFpbCI6ImFub255bW91cyIsInBsYW4iOiJzdGFuZGFyZCIsIm9yZGVyX2lkIjoib3JkXzUxMDk4OTgwX2UzYjhjMCIsInNvdXJjZSI6ImRlbW9fcHVyY2hhc2VfcGFnZSIsImlhdCI6MTc3NDMzOTczNSwiZXhwIjoxNzg5ODkxNzM1LCJub25jZSI6Ijc0ZDU1OWU0ZjFhZmYyNjhhY2ZiMmRhZSJ9.FPIR_TIoowmTD6OpdIcpICQdr41CtraAjhFAp6SydFc" --input "你的问题"
+python .\skills\analysis-consultant\openclaw_adapter.py --license "YOUR_LICENSE" --input "你的问题"
 ```
 
 For a more organized handoff, use summary mode:
 
 ```powershell
-python .\skills\analysis-consultant\openclaw_adapter.py --license "eyJ2IjoxLCJwcm9kdWN0IjoibWVtYmVyLXNraWxsLWRlbW8iLCJlbWFpbCI6ImFub255bW91cyIsInBsYW4iOiJzdGFuZGFyZCIsIm9yZGVyX2lkIjoib3JkXzUxMDk4OTgwX2UzYjhjMCIsInNvdXJjZSI6ImRlbW9fcHVyY2hhc2VfcGFnZSIsImlhdCI6MTc3NDMzOTczNSwiZXhwIjoxNzg5ODkxNzM1LCJub25jZSI6Ijc0ZDU1OWU0ZjFhZmYyNjhhY2ZiMmRhZSJ9.FPIR_TIoowmTD6OpdIcpICQdr41CtraAjhFAp6SydFc" --summary --input "今日A股能源板块有什么重要信号"
+python .\skills\analysis-consultant\openclaw_adapter.py --license "YOUR_LICENSE" --summary --input "今日A股能源板块有什么重要信号"
 ```
 
 Or pipe JSON on stdin:
 
 ```powershell
 @'
-{"client":"openclaw","response_mode":"compact","license":"eyJ2IjoxLCJwcm9kdWN0IjoibWVtYmVyLXNraWxsLWRlbW8iLCJlbWFpbCI6ImFub255bW91cyIsInBsYW4iOiJzdGFuZGFyZCIsIm9yZGVyX2lkIjoib3JkXzUxMDk4OTgwX2UzYjhjMCIsInNvdXJjZSI6ImRlbW9fcHVyY2hhc2VfcGFnZSIsImlhdCI6MTc3NDMzOTczNSwiZXhwIjoxNzg5ODkxNzM1LCJub25jZSI6Ijc0ZDU1OWU0ZjFhZmYyNjhhY2ZiMmRhZSJ9.FPIR_TIoowmTD6OpdIcpICQdr41CtraAjhFAp6SydFc","input":"你的问题"}
+{"client":"openclaw","response_mode":"compact","license":"YOUR_LICENSE","input":"你的问题"}
 '@ | python .\skills\analysis-consultant\openclaw_adapter.py
 ```
 
@@ -46,14 +46,3 @@ Or pipe JSON on stdin:
 - Auto-extracts common answer fields and prints a clean handoff.
 - If the backend returns 403, reports membership check failure.
 - Does not store the large prompt locally.
-
-## License details
-
-- Buyer: anonymous
-- Plan: standard
-- Expires: 2026-09-20T08:08:55.000Z
-- Install into: C:\Users\hanji\.openclaw\workspace\skills\analysis-consultant
-
-## Local demo notes
-- In local testing, you may send token: "demo-123" instead of license.
-- For OpenClaw, prefer client: "openclaw" and response_mode: "compact" to keep replies short and stable.
