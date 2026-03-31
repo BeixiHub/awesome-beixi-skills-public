@@ -1,0 +1,3 @@
+interface:
+  display_name: "Engineering Loop"
+  short_description: "Inspect, patch, verify, and summarize code changes"

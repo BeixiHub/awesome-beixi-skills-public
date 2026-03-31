@@ -127,6 +127,33 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 - **Discord links:** Wrap multiple links in `<>` to suppress embeds: `<https://example.com>`
 - **WhatsApp:** No headers — use **bold** or CAPS for emphasis
 
+### 📐 Default Output Layout
+
+When writing polished answers, prefer:
+- **Block-internal compactness** — keep each block tight and easy to scan
+- **Block-external spacing** — leave visibly larger gaps between blocks
+- **Default rule:** each content block gets **two blank lines before and after** when the surface preserves spacing
+- Use visible separators like `——` or `---` when the UI compresses blank lines too aggressively
+- Do not add extra loose spacing *inside* a block unless it materially improves readability
+
+## Finance Analysis Work Contract
+
+For finance / investment / stock / fund / macro / valuation questions:
+- Default to **web search + QVeris** dual track
+- Write for a **financially literate reader**, not for tool demos
+- Use **conclusion first**, then structured support
+- Keep **high readability**, low AI smell, and low tool traces
+- Prefer covering: **core view, drivers, valuation, fundamentals, financial quality, funding/flows, catalysts, risks, tracking indicators**
+- Use **card-like blocks** with clear separators
+- Each analysis dimension should stand alone
+- Follow the default layout above: **two blank lines before and after each content block** when the surface allows it
+- If the UI compresses blank lines, rely on `——` / `---` to preserve visual boundaries
+- Avoid code blocks for financial prose
+- Prefer short, natural-language block titles; do **not** use机械化标签 like “XX卡”
+- Keep block content compact, but do not sacrifice useful numbers, conditions, or judgment
+- Use emojis sparingly, mainly in block titles, to improve scanability without hurting professionalism
+- The “开盘前 briefing / 今日要闻总结” style is the default preferred finance presentation format
+
 ## 💓 Heartbeats - Be Proactive!
 
 When you receive a heartbeat poll (message matches the configured heartbeat prompt), don't just reply `HEARTBEAT_OK` every time. Use heartbeats productively!
