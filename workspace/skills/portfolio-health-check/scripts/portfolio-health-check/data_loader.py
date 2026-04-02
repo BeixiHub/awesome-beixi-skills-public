@@ -346,13 +346,26 @@ def load_portfolio(
 def load_and_normalize_portfolio(
     source: str | Path | pd.DataFrame | list[dict[str, Any]] | Mapping[str, Any],
 ) -> tuple[list[Holding], float, list[str]]:
-    """Load portfolio and normalize weights to 100%.
+    """Load portfolio, merge duplicate tickers, and normalize weights to 100%.
 
     Returns (holdings, cash_pct, warnings).
     """
     holdings, cash_pct = load_portfolio(source)
     warnings: list[str] = []
+
+    # Merge duplicate tickers (A 30% + A 20% -> A 50%)
+    seen: dict[str, Holding] = {}
+    for h in holdings:
+        if h.ticker in seen:
+            seen[h.ticker].weight_pct += h.weight_pct
+            warnings.append(f"重复标的 {h.ticker}，权重已合并")
+        else:
+            seen[h.ticker] = h
+    holdings = list(seen.values())
+
     total = sum(h.weight_pct for h in holdings) + cash_pct
+    if total == 0:
+        raise ValueError("持仓权重之和为 0，无法归一化。请检查输入数据。")
     if abs(total - 100) > 0.1:
         scale = 100 / total
         for h in holdings:

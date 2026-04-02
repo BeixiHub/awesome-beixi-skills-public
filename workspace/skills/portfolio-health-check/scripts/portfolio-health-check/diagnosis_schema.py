@@ -76,13 +76,21 @@ def validate_diagnosis_result(result: dict[str, Any]) -> None:
 
 
 def validate_diagnosis_data(data: dict[str, Any]) -> None:
-    """Validate just the .data portion (used by Phase 3 consumers)."""
+    """Validate just the .data portion (used by Phase 3 consumers).
+
+    Checks section presence AND structural integrity of key sections.
+    """
     if not isinstance(data, dict):
         raise DiagnosisSchemaError(f"Expected dict for data, got {type(data).__name__}")
 
     missing = REQUIRED_DATA_SECTIONS - set(data.keys())
     if missing:
         raise DiagnosisSchemaError(f"Missing required data sections: {missing}")
+
+    _validate_correlation_matrix(data["correlation_matrix"])
+    _validate_risk_metrics(data["risk_metrics"])
+    _validate_risk_flags(data["risk_flags"])
+    _validate_metadata(data["metadata"])
 
 
 # ---------------------------------------------------------------------------
