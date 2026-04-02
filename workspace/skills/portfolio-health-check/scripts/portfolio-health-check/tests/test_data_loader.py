@@ -1,8 +1,8 @@
 """Tests for data_loader.py"""
 import pytest
 import pandas as pd
-from pathlib import Path
 
+from asset_paths import get_assets_dir
 from data_loader import (
     load_scenario,
     load_portfolio,
@@ -17,7 +17,7 @@ from data_loader import (
     LOOKBACK_DAILY_BARS,
 )
 
-ASSETS = Path(__file__).resolve().parent.parent.parent.parent / "Interview" / "portfolio-health-check" / "assets"
+ASSETS = get_assets_dir(__file__)
 SCENARIOS = ASSETS / "scenarios"
 PORTFOLIOS = ASSETS / "sample-portfolios"
 STOCK_DATA = ASSETS / "stock_data" / "stock_data"

@@ -2,8 +2,8 @@
 import pytest
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
+from asset_paths import get_assets_dir
 from compute.benchmark import (
     select_benchmark,
     select_benchmark_details,
@@ -12,7 +12,7 @@ from compute.benchmark import (
 )
 from data_loader import load_fundamentals, load_benchmark
 
-ASSETS = Path(__file__).resolve().parent.parent.parent.parent / "Interview" / "portfolio-health-check" / "assets"
+ASSETS = get_assets_dir(__file__)
 FUND_DATA = ASSETS / "stock_data" / "fundamental_data.csv"
 BENCH_DATA = ASSETS / "stock_data" / "benchmark_daily.csv"
 

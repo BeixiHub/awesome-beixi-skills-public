@@ -343,6 +343,25 @@ def load_portfolio(
     return _portfolio_from_frame(df)
 
 
+def load_and_normalize_portfolio(
+    source: str | Path | pd.DataFrame | list[dict[str, Any]] | Mapping[str, Any],
+) -> tuple[list[Holding], float, list[str]]:
+    """Load portfolio and normalize weights to 100%.
+
+    Returns (holdings, cash_pct, warnings).
+    """
+    holdings, cash_pct = load_portfolio(source)
+    warnings: list[str] = []
+    total = sum(h.weight_pct for h in holdings) + cash_pct
+    if abs(total - 100) > 0.1:
+        scale = 100 / total
+        for h in holdings:
+            h.weight_pct *= scale
+        cash_pct *= scale
+        warnings.append(f"权重之和={total:.1f}%，已自动归一化到100%")
+    return holdings, cash_pct, warnings
+
+
 def _prices_from_frame(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize prices DataFrame -> [code, datetime, close, volume].
 

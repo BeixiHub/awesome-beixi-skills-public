@@ -1,11 +1,11 @@
 # Portfolio Health Check
 
-A-share 组合健康诊断引擎。输入持仓和场景参数，输出 15 步量化诊断结果 + HTML/PDF 报告。
+A-share 组合健康诊断引擎。输入持仓和场景参数，默认输出 15 步量化诊断结果 + `client_output` 结构化文字；HTML/PDF 仅在显式要求时生成。
 
 ## 架构
 
 ```
-pipeline_main.py          API 入口：归一化 payload → 拉取行情 → 诊断 → 生成报告
+pipeline_main.py          API 入口：归一化 payload → 拉取行情 → 诊断 → 返回结构化文字（可选 artifacts）
   ├─ qveris_client.py     QVeris API 客户端（行情/基本面数据）
   ├─ diagnosis.py          诊断编排器：串联 15 个步骤
   │   ├─ data_loader.py    数据加载 & 格式归一化
@@ -74,8 +74,17 @@ export QVERIS_TOKEN="your_api_key_here"
 ### 2. 命令行运行
 
 ```bash
+python pipeline_main.py payload.json --as-of 2026-03-31
+python pipeline_main.py payload.json --as-of 2026-03-31 --emit-artifacts
 python pipeline_main.py payload.json --as-of 2026-03-31 --pdf
 ```
+
+默认情况下，`run_pipeline()` 和 CLI 都返回结构化的 `client_output`，不会额外落本地文件。
+只有在以下情况才会生成文件产物：
+
+- 显式传入 `output_dir`
+- 显式传入 `emit_artifacts=True` 或 `--emit-artifacts`
+- 显式要求 `include_pdf=True` 或 `--pdf`
 
 `payload.json` 格式：
 
@@ -211,6 +220,15 @@ python -m pytest tests/ -v
     "liquidity": { "holdings": [], "portfolio_max_liquidation_days": 0.0 },
     "risk_flags": [{ "severity": "", "metric": "", "explanation": "" }],
     "metadata": { "data_frequency": "", "warnings": [] }
-  }
+  },
+  "client_output": {
+    "title": "组合诊断摘要",
+    "headline": "给客户看的总判断",
+    "sections": [
+      { "heading": "总体判断", "bullets": ["..."] }
+    ],
+    "markdown": "# 组合诊断摘要\n..."
+  },
+  "artifacts": null
 }
 ```

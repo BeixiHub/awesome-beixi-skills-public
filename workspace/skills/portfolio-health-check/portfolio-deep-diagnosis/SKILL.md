@@ -1,28 +1,25 @@
 ---
 name: portfolio-deep-diagnosis
-description: 用于对投资组合进行深度诊断、参数补全、量化/技术视角分析和风险识别。适用于用户请求深度诊断、相关性分析、风险分析、因子暴露或 `deep-diagnosis` 风格报告时。
+description: 用于对投资组合进行深度诊断。收集 4 个分析参数后调用 run_pipeline() 完成量化计算，再向用户解释诊断结果。
 ---
 
 # 投资组合深度诊断
 
 ## 目的
 
-把持仓与分析参数整理成一份结构化的深度诊断结果，重点输出相关性、风险、因子暴露和关键风险点。
+把持仓与分析参数整理成结构化的深度诊断结果，重点输出相关性、风险指标、因子暴露和关键风险点。
 
 ## 适用场景
-
-当任务是以下内容时使用本技能：
 
 - 进一步分析组合的波动、相关性和风险结构
 - 结合参数判断持仓管理风格
 - 识别组合中的风格暴露和因子偏向
-- 输出更偏量化/技术视角的诊断结论
+- 输出量化/技术视角的诊断结论，并整理成可直接转述给客户的结构化文字
 
-## 总体分工
+## 前提条件
 
-- `SKILL.md`：负责流程控制、参数收集、确认步骤和调用顺序。
-- `analysis_prompt.md`：负责分析逻辑、数据检索范围和风险判断。
-- `report_prompt.md`：负责最终报告格式、章节结构和输出措辞。
+- 第 1 阶段（快速诊断）已完成，持仓确认表已定稿
+- `state/portfolio_state.json` 的 `stage1` 已有结构化持仓数据
 
 ## 核心规则
 
@@ -30,113 +27,141 @@ description: 用于对投资组合进行深度诊断、参数补全、量化/技
 - 不要声称自己知道实时价格、最新基金持仓，或任何未提供、未验证的外部事实。
 - 不要给出买卖指令，也不要预测市场走势。
 - 清楚区分已知事实和粗略假设。
-- 深度诊断必须先收集 4 个参数：
-  - `rebalance_frequency`
-  - `position_style`
-  - `risk_tolerance`
-  - `investment_horizon`
-- 如果参数不足，先追问最少必要信息。
 - 最多进行 3 轮补充信息对话。
+- 默认不要生成 HTML、PDF 或其他本地报告文件。优先返回 `client_output` 结构化文字给父级 workflow 或 OpenClaw。
 
-## 数据获取规则
+## 执行流程
 
-- 深度诊断阶段必须先调用 QVeris，不能跳过。
-- 至少执行一次 `scripts/qveris_client.py search`，再决定是否继续。
-- 优先获取：行情或价格区间、行业背景、相关性依据、波动/回撤线索、宏观或行业数据。
-- 如果 QVeris 无法返回所需数据，再使用公开网络资料交叉验证。
-- 如果两者冲突，明确标记冲突，不要强行下结论。
-- 如果数据仍然不足，要明确写“暂无充分证据”。
+### Step 1：收集深度诊断参数
 
-## QVeris 调用步骤
+必须收齐 4 个参数，缺一不可：
 
-1. 用 `scripts/qveris_client.py search` 搜索与你要的数据相匹配的工具。
-2. 读取返回中的 `search_id`、`tool_id`、`params`、`examples`。
-3. 按 `params` 准备参数文件，优先用 `--parameters-file` 执行。
-4. 执行后把原始返回整理成相关性、波动、风险和背景要点。
-5. 如果第一次搜索不到合适工具，换一个更聚焦的 query 再搜。
-6. 只有在 QVeris 确实找不到可用工具时，才退回到公开网络资料。
+| 参数 | 字段名 | 选项 |
+|------|--------|------|
+| 换仓频率 | `rebalance_frequency` | `intraday` / `weekly` / `monthly` / `quarterly` / `buy_and_hold` |
+| 仓位风格 | `position_style` | `market_timing` / `full_rotation` / `constant_mix` / `dca` / `core_satellite` |
+| 风险偏好 | `risk_tolerance` | `conservative` / `moderate` / `aggressive` / `very_aggressive` |
+| 投资期限 | `investment_horizon` | `<1y` / `1-3y` / `3-5y` / `>5y` |
 
-### 推荐 query
+如果用户不理解某个参数，用选项形式提问，不要让用户自由描述。
 
-- `historical price data API`
-- `stock correlation and volatility API`
-- `industry sector classification API`
-- `market macro data API`
+### Step 2：组装 payload 并调用 `run_pipeline()`
 
-## 按换仓频率取数
+用第 1 阶段的持仓数据和本阶段收集的参数构建 payload，调用 Python 管线完成全部量化计算。
 
-深度诊断必须根据 `rebalance_frequency` 选择不同的数据粒度。默认使用 `close` 和 `volume` 两类数据。
+```python
+from pipeline_main import run_pipeline
 
-| 换仓频率 | 主数据（交易分析） | 辅助数据（宏观视角） |
-|---------|----------------|-------------------|
-| 日内 | 15分钟 / 3个月 | 日线 / 1年 |
-| 周度 | 日线 / 1年 | — |
-| 月度 | 日线 / 2年 | — |
-| 季度 | 周线 / 3年 | — |
-| 长期持有 | 月线 / 5年 | — |
+payload = {
+    "holdings": [
+        {"code": "600519.SH", "name": "贵州茅台", "weight_pct": 30.0},
+        # ... 从 stage1 持仓表构建
+    ],
+    "cash_pct": 10.0,        # 来自 stage1
+    "params": {
+        "rebalance_frequency": "monthly",
+        "position_style": "core_satellite",
+        "risk_tolerance": "moderate",
+        "investment_horizon": "3-5y",
+        "portfolio_market_value": 1000000,  # 如用户提供
+    },
+}
 
-### THS 调用规则
+result = run_pipeline(payload)
+```
 
-- 15 分钟数据使用 `ths_ifind.hf_basic_quotation.v1`
-  - 参数：`codes`、`starttime`、`endtime`、`interval="15"`
-- 日线 / 周线 / 月线 / 3 个月 / 1 年 / 2 年 / 3 年 / 5 年数据使用 `ths_ifind.history_quotation.v1`
-  - 参数：`codes`、`startdate`、`enddate`、`interval="D"|"W"|"M"`，历史行情优先只取 `close` 和 `volume`
-- 15 分钟和历史行情都要先保存精简后的结构化结果，只保留 `code/time/close/volume`
-- 同一批数据写入 `state/portfolio_state.json` 的 `stage2.ths_data`
-- `state/artifacts/` 只保留当前快照的精简后的摘要和行数据
-- 新参数触发新一轮取数时，脚本会自动清空旧快照，避免缓存散落
+**`run_pipeline()` 内部自动完成：**
+- QVeris 数据拉取（行情、基本面、市值、基准）
+- 按 `rebalance_frequency` 选择数据粒度和回看窗口
+- 15 步量化诊断（相关性、风险指标、集中度、因子暴露、流动性、风险旗标等）
+- 诊断结果整理成 `client_output` 结构化文字
 
-### 执行顺序
+只有在显式要求时，才通过 `output_dir` / `emit_artifacts` / `include_pdf` 生成 HTML/PDF 文件。
 
-1. 先用 `scripts/qveris_client.py ths-collect <codes> --rebalance-frequency <frequency>` 生成对应数据。
-2. 如果要一次性测试全覆盖，可以加 `--all`，会把 15 分钟、日线、周线、月线和 3 个月 / 1 年 / 2 年 / 3 年 / 5 年都取一遍。
-3. 如果相同参数的 artifact 已存在，脚本会直接复用，不再重复调用接口。
-4. 如果参数变化，脚本会清空旧快照并重建当前这一版文件。
-5. 调用后把结果整理成结构化摘要，再写回 `state/portfolio_state.json`。
-6. 分析时只看 `close` 和 `volume`，不再保留其他行情字段。
-7. 如果 `rebalance_frequency` 是 `intraday`，必须同时保留 15 分钟 / 3 个月和日线 / 1 年两套数据。
+**不要手动调用 QVeris/THS 取数据，不要手动跑分析逻辑。** `run_pipeline()` 是唯一计算入口。
 
-### 状态存储
+### Step 3：处理返回结果
 
-- 第 2 阶段的 `market-plan` 和 `market-search` 结果只保留当前一版，不再累积历史调用。
-- 这份文件会保留第 1 阶段写入的内容，因此后续 Python 脚本可以直接同时读取 stage1 + stage2。
-- 如果重新运行第 2 阶段，应该覆盖同一个 stage2 区块，并清空旧快照。
+`run_pipeline()` 返回 `dict`，结构如下：
 
-## 信息收集流程
+```python
+# 成功
+{
+    "status": "ok",
+    "error_message": None,
+    "data": {
+        "correlation_matrix": {...},
+        "risk_metrics": {"holdings": [...], "portfolio": {...}},
+        "risk_contribution": {...},
+        "concentration": {...},
+        "benchmark": {...},
+        "factor_exposure": {...},
+        "sector_exposure": {...},
+        "liquidity": {...},
+        "intraday_micro": {...},    # 仅 intraday 频率
+        "risk_flags": [...],
+        "metadata": {...},
+    },
+    "client_output": {
+        "title": "组合诊断摘要",
+        "headline": "...",
+        "sections": [...],
+        "markdown": "..."
+    },
+    "artifacts": null,              # 默认不生成文件；显式要求时才有路径
+    "pipeline": {
+        "as_of": "2026-04-01",
+        "requested_rebalance_frequency": "monthly",
+        "selected_benchmark": {...},
+        "qveris_inputs": {...},
+    },
+}
 
-1. 识别持仓和现金占比。
-2. 收集深度诊断参数。
-3. 如有需要，补充说明持仓集中度、风格偏好或用户关注重点。
-4. 调用 THS / QVeris 和公开网络资料补充所需数据。
-5. 生成深度诊断分析结果。
+# 失败
+{
+    "status": "error",
+    "error_message": "具体错误信息",
+    "data": None,
+    "artifacts": None,
+}
+```
 
-## 参数识别
+### Step 4：向用户解释诊断结果
 
-`params` 字段建议按以下方式收集：
+**如果 `status == "ok"`：**
 
-- `rebalance_frequency`：`intraday` / `weekly` / `monthly` / `quarterly` / `buy_and_hold`
-- `position_style`：`market_timing` / `full_rotation` / `constant_mix` / `dca` / `core_satellite`
-- `risk_tolerance`：`conservative` / `moderate` / `aggressive` / `very_aggressive`
-- `investment_horizon`：`<1y` / `1-3y` / `3-5y` / `>5y`
+1. 先用 1-2 句话给出总体判断（组合更像什么类型、核心风险在哪）。
+2. 优先使用 `client_output` 里的 `headline / sections / markdown` 作为对客交付底稿。
+3. 如需补充解释，再按以下顺序解读底层 section：
+   - `risk_flags`：哪些旗标被触发，严重程度如何
+   - `risk_metrics.portfolio`：波动率、夏普、最大回撤等关键指标
+   - `concentration`：集中度是否过高
+   - `correlation_matrix.high_correlation_pairs`：高相关性配对
+   - `factor_exposure.portfolio`：因子偏向
+   - `liquidity`：清仓所需天数
+   - `benchmark`：与基准的相对表现
+4. 不要把原始 JSON 贴给用户，要翻译成人能读的结论。
+5. 对无法确认的地方标注为推断。
+6. 只有在用户明确要求导出报告时，才说明 `artifacts` 里的文件路径。
 
-## 调用顺序
+**如果 `status == "error"`：**
 
-1. 先确认持仓信息和现金占比。
-2. 追问深度诊断参数。
-3. 先用 THS / QVeris 检索所需数据，再用公开网络资料补充或交叉验证。
-4. 调用 `analysis_prompt.md` 生成分析要点。
-5. 再调用 `report_prompt.md` 生成最终报告。
-6. 输出完成后，把控制权交回父级 workflow。
+1. 告知用户诊断未能完成。
+2. 根据 `error_message` 判断是数据问题（QVeris 不可达、代码不匹配）还是代码 bug。
+3. 如果是数据问题，建议用户检查持仓代码或稍后重试。
+4. 如果是代码 bug，如实告知。
+
+### Step 5：交还控制权
+
+诊断结果解释完毕后，把控制权交回父级 workflow（`portfolio-health-check/SKILL.md`），由父级询问用户是否继续进入第 3 阶段。
 
 ## 边界规则
 
-- 不得编造历史收益、波动率、回撤、相关系数或因子暴露数值。
-- 如果这些量化信息无法从用户提供信息或公开来源中合理得到，要明确写“暂无充分证据”。
-- 可以做基于常识的风险判断，但必须标注为推断。
+- 不得编造历史收益、波动率、回撤、相关系数或因子暴露数值——这些全部由 `run_pipeline()` 计算得出。
+- 如果 `run_pipeline()` 返回的某些指标因数据不足而缺失（见 `metadata.warnings`），要如实告知用户。
+- 可以做基于诊断结果的定性判断，但必须标注判断依据来自哪个 section。
 
 ## 参考文件
 
-- [qveris.md](../../../../qveris.md)
-- [qveris_client.py](../../scripts/qveris_client.py)
-- [analysis_prompt.md](analysis_prompt.md)
-- [report_prompt.md](report_prompt.md)
+- [pipeline_main.py](../scripts/portfolio-health-check/pipeline_main.py) — Phase 2 唯一计算入口
+- [diagnosis.py](../scripts/portfolio-health-check/diagnosis.py) — 15 步诊断编排
