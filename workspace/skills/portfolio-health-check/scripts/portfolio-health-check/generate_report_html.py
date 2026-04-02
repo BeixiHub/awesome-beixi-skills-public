@@ -1,6 +1,8 @@
 """
 Generate magazine-style paged HTML report from diagnosis results.
 Open in Chrome → Ctrl+P → Save as PDF (margins: none, background graphics: on).
+
+TODO: Migrate from f-string concatenation to Jinja2 templates for maintainability.
 """
 from __future__ import annotations
 import json, sys, math

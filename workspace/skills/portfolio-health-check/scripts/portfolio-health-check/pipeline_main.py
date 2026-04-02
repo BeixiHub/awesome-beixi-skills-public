@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import traceback
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -186,6 +188,7 @@ def run_pipeline(
         }
         return diagnosis_result
     except Exception as exc:
+        logging.error("Pipeline failed: %s\n%s", exc, traceback.format_exc())
         return {
             "status": "error",
             "error_message": str(exc),

@@ -135,6 +135,9 @@ def run_diagnosis(
     if data_points < 30:
         warnings.append(f"数据点仅{data_points}个，结果可能不可靠")
 
+    if not main_prices_by:
+        return {"status": "error", "error_message": "价格数据为空，无法诊断", "data": None}
+
     first_code = next(iter(main_prices_by))
     date_range = [
         str(main_prices_by[first_code].index.min().date()),

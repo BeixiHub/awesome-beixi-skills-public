@@ -77,11 +77,11 @@ def compute_intraday_micro(
     if intraday_prices_by_code is None or intraday_datetimes is None:
         return None
 
-    hours = intraday_datetimes.dt.hour
-
     vol_by_hour: dict[str, float] = {}
     for code, volumes in (intraday_volumes_by_code or {}).items():
-        df = pd.DataFrame({"hour": hours.values[:len(volumes)], "vol": volumes.values})
+        vol_series = volumes.copy()
+        vol_series.index = pd.to_datetime(vol_series.index)
+        df = pd.DataFrame({"hour": vol_series.index.hour, "vol": vol_series.values})
         hourly = df.groupby("hour")["vol"].mean()
         for h, v in hourly.items():
             key = f"{int(h):02d}:00"
@@ -89,8 +89,10 @@ def compute_intraday_micro(
 
     vol_by_hour_volatility: dict[str, float] = {}
     for code, prices in intraday_prices_by_code.items():
-        returns = prices.pct_change().dropna()
-        df = pd.DataFrame({"hour": hours.values[1:len(returns) + 1], "ret": returns.values})
+        price_series = prices.copy()
+        price_series.index = pd.to_datetime(price_series.index)
+        returns = price_series.pct_change().dropna()
+        df = pd.DataFrame({"hour": returns.index.hour, "ret": returns.values})
         hourly_vol = df.groupby("hour")["ret"].std()
         for h, v in hourly_vol.items():
             key = f"{int(h):02d}:00"
