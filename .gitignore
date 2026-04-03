@@ -5,6 +5,7 @@
 !.env.sample
 !.env.template
 *.local
+openclaw.env
 
 # Python cache / virtual env
 __pycache__/
@@ -42,3 +43,15 @@ openclaw.json.bak*
 # SQLite transient files
 *.sqlite-shm
 *.sqlite-wal
+
+# OpenClaw runtime (generated, not source)
+runtime/
+agents/
+memory/
+tasks/
+devices/
+logs/
+canvas/
+completions/
+exec-approvals.json
+update-check.json

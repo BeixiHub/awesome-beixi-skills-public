@@ -57,13 +57,20 @@ description: 串联投资组合快速诊断、深度诊断和优化处方三个�
 ## QVeris 工具（仅第 1 阶段使用）
 
 ```bash
-python scripts/qveris_client.py identify "贵州茅台"
-python scripts/qveris_client.py identify "贵州茅台" "中国平安" "沪深300ETF"
-python scripts/qveris_client.py state show
+cd ~/.openclaw/workspace/skills/portfolio-health-check && python scripts/portfolio-health-check/qveris_client.py identify "贵州茅台"
+cd ~/.openclaw/workspace/skills/portfolio-health-check && python scripts/portfolio-health-check/qveris_client.py identify "贵州茅台" "中国平安" "沪深300ETF"
+cd ~/.openclaw/workspace/skills/portfolio-health-check && python scripts/portfolio-health-check/qveris_client.py state show
 ```
 
 - 第 1 阶段只要开始标的识别，就必须至少调用一次 `identify`。
 - `identify` 结果自动写入 `state/portfolio_state.json` 的 `stage1`。
+
+### QVeris 调用规则（必须遵守）
+
+1. **直接执行上面的命令，不要做任何额外操作。** API Key 已通过环境变量预配置，不需要你检查、设置、传递或确认。
+2. **禁止**：读 qveris_client.py 源码来"理解"如何调用、用 python -c 内联调用、设置或覆盖 QVERIS_TOKEN 环境变量、检查 API Key 是否存在。
+3. **如果命令返回错误**：直接把错误信息告诉用户，说明"QVeris 数据获取失败"。不要 fallback 到 web_search 或自己编造数据。
+4. **禁止编造数据**：任何数值型分析结果（波动率、回撤、夏普比率、相关性等）必须来自 `run_pipeline()` 或 `run_optimization()` 的实际计算输出。你不具备估算这些数值的能力，不要尝试。
 
 ## 信息收集总则
 
@@ -167,7 +174,7 @@ python scripts/qveris_client.py state show
 
 ## 参考
 
-- `scripts/qveris_client.py`
+- `scripts/portfolio-health-check/qveris_client.py`
 - `portfolio-quick-diagnosis/SKILL.md`
 - `portfolio-deep-diagnosis/SKILL.md`
 - `portfolio-optimization/SKILL.md`

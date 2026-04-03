@@ -45,40 +45,62 @@ description: 用于对投资组合进行深度诊断。收集 4 个分析参数�
 
 如果用户不理解某个参数，用选项形式提问，不要让用户自由描述。
 
-### Step 2：组装 payload 并调用 `run_pipeline()`
+### Step 2：组装 payload 并通过 CLI 调用 pipeline
 
-用第 1 阶段的持仓数据和本阶段收集的参数构建 payload，调用 Python 管线完成全部量化计算。
+用第 1 阶段的持仓数据和本阶段收集的参数构建 payload JSON 文件，然后通过命令行调用 pipeline。
 
-```python
-from pipeline_main import run_pipeline
+**Step 2a：写 payload 文件**
 
-payload = {
+用 exec 工具把 payload 写到 `/tmp/portfolio_payload.json`：
+
+```json
+{
     "holdings": [
         {"code": "600519.SH", "name": "贵州茅台", "weight_pct": 30.0},
-        # ... 从 stage1 持仓表构建
+        {"code": "300750.SZ", "name": "宁德时代", "weight_pct": 25.0}
     ],
-    "cash_pct": 10.0,        # 来自 stage1
+    "cash_pct": 10.0,
     "params": {
         "rebalance_frequency": "monthly",
         "position_style": "core_satellite",
         "risk_tolerance": "moderate",
         "investment_horizon": "3-5y",
-        "portfolio_market_value": 1000000,  # 如用户提供
-    },
+        "portfolio_market_value": 1000000
+    }
 }
-
-result = run_pipeline(payload)
 ```
 
-**`run_pipeline()` 内部自动完成：**
+> 从 `state/portfolio_state.json` 的 `stage1` 读取持仓数据构建 holdings 数组。每个 holding 必须有 `code` 和 `weight_pct`。
+
+**Step 2b：调用 CLI**
+
+```bash
+cd ~/.openclaw/workspace/skills/portfolio-health-check && \
+  python scripts/portfolio-health-check/pipeline_main.py \
+  /tmp/portfolio_payload.json \
+  --emit-artifacts \
+  --output-dir /tmp/portfolio_output \
+  --as-of $(date +%Y-%m-%d)
+```
+
+> 执行成功后，结果文件在 `/tmp/portfolio_output/` 目录：
+> - `diagnosis_result.json` — 完整诊断结果（Step 3 解读用）
+> - `_internal.json` — 内部数据（Phase 3 优化用，不需要解读）
+> - `diagnosis_report.html` — HTML 报告（仅在用户要求时提及）
+
+**Step 2c：读取结果**
+
+```bash
+cat /tmp/portfolio_output/diagnosis_result.json
+```
+
+**`pipeline_main.py` CLI 内部自动完成：**
 - QVeris 数据拉取（行情、基本面、市值、基准）
 - 按 `rebalance_frequency` 选择数据粒度和回看窗口
 - 15 步量化诊断（相关性、风险指标、集中度、因子暴露、流动性、风险旗标等）
 - 诊断结果整理成 `client_output` 结构化文字
 
-只有在显式要求时，才通过 `output_dir` / `emit_artifacts` / `include_pdf` 生成 HTML/PDF 文件。
-
-**不要手动调用 QVeris/THS 取数据，不要手动跑分析逻辑。** `run_pipeline()` 是唯一计算入口。
+**不要手动调用 QVeris/THS 取数据，不要手动跑分析逻辑。** CLI 是唯一计算入口。
 
 ### Step 3：处理返回结果
 

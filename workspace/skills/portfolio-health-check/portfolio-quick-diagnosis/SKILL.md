@@ -53,13 +53,13 @@ description: 用于快速分析投资组合的持仓概览、集中度检查和�
 单个标的：
 
 ```bash
-python .cursor/skills/portfolio-health-check/scripts/qveris_client.py identify "贵州茅台"
+cd ~/.openclaw/workspace/skills/portfolio-health-check && python scripts/portfolio-health-check/qveris_client.py identify "贵州茅台"
 ```
 
 多个标的（批量）：
 
 ```bash
-python .cursor/skills/portfolio-health-check/scripts/qveris_client.py identify "贵州茅台" "中国平安" "沪深300ETF"
+cd ~/.openclaw/workspace/skills/portfolio-health-check && python scripts/portfolio-health-check/qveris_client.py identify "贵州茅台" "中国平安" "沪深300ETF"
 ```
 
 `identify` 命令会依次调用三个工具：

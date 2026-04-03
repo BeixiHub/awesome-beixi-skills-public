@@ -6,6 +6,7 @@ Flow:
 3. Run diagnosis with direct dict/DataFrame inputs
 4. Return structured client text, with optional HTML/PDF artifacts
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,8 +19,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from compute.benchmark import BENCHMARK_NAMES, select_benchmark_details
-from data_loader import Holding, load_and_normalize_portfolio
+from compute.benchmark import select_benchmark_details
+from data_loader import Holding
 from date_utils import shift_months, shift_years, format_ymd
 from diagnosis import run_diagnosis
 from generate_report_html import generate_html
@@ -143,14 +144,15 @@ def run_pipeline(
         # Separate cash rows before any aggregation
         cash_mask = holdings_frame["code"].apply(_is_cash_code)
         if "vehicle_type" in holdings_frame.columns:
-            cash_mask = cash_mask | (holdings_frame["vehicle_type"].str.lower() == "cash")
+            cash_mask = cash_mask | (
+                holdings_frame["vehicle_type"].str.lower() == "cash"
+            )
         cash_from_holdings = float(holdings_frame.loc[cash_mask, "weight_pct"].sum())
         holdings_frame = holdings_frame.loc[~cash_mask].copy()
 
         # Merge duplicate tickers (e.g. 600519 30% + 20% -> 50%)
-        holdings_frame = (
-            holdings_frame.groupby("code", as_index=False)
-            .agg({c: "first" if c != "weight_pct" else "sum" for c in holdings_frame.columns})
+        holdings_frame = holdings_frame.groupby("code", as_index=False).agg(
+            {c: "first" if c != "weight_pct" else "sum" for c in holdings_frame.columns}
         )
 
         codes = holdings_frame["code"].dropna().astype(str).tolist()
@@ -167,13 +169,22 @@ def run_pipeline(
         benchmark_choice = select_benchmark_details(weights, fundamentals)
         benchmark_history = qveris.fetch_history_quotation(
             [benchmark_choice["benchmark_code"]],
-            startdate=format_ymd(_lookback_start(anchor, SCENARIO_MAP[payload["params"]["rebalance_frequency"]]["benchmark_period"])),
+            startdate=format_ymd(
+                _lookback_start(
+                    anchor,
+                    SCENARIO_MAP[payload["params"]["rebalance_frequency"]][
+                        "benchmark_period"
+                    ],
+                )
+            ),
             enddate=format_ymd(anchor),
             interval="D",
             indicators="close",
         )
 
-        portfolio_payload = _build_portfolio_payload(payload, holdings_frame, basics, cash_from_holdings)
+        portfolio_payload = _build_portfolio_payload(
+            payload, holdings_frame, basics, cash_from_holdings
+        )
         captured: dict = {}
         diagnosis_result = run_diagnosis(
             scenario,
@@ -186,7 +197,13 @@ def run_pipeline(
         if diagnosis_result["status"] != "ok":
             return diagnosis_result
 
-        diagnosis_result["client_output"] = build_diagnosis_client_output(diagnosis_result)
+        diagnosis_result["client_output"] = build_diagnosis_client_output(
+            diagnosis_result
+        )
+
+        # Build _internal for Phase 3 consumption (before artifacts, so it can be persisted)
+        internal_data = _build_internal(captured, payload)
+        diagnosis_result["_internal"] = internal_data
 
         artifact_paths = None
         if emit_artifacts or output_dir is not None or include_pdf:
@@ -194,13 +211,9 @@ def run_pipeline(
                 diagnosis_result,
                 output_dir=output_dir,
                 include_pdf=include_pdf,
+                internal_data=internal_data,
             )
         diagnosis_result["artifacts"] = artifact_paths
-
-        # Build _internal for Phase 3 consumption (after artifacts, never written to disk)
-        diagnosis_result["_internal"] = _build_internal(
-            captured, payload,
-        )
         diagnosis_result["pipeline"] = {
             "as_of": format_ymd(anchor),
             "requested_rebalance_frequency": payload["params"]["rebalance_frequency"],
@@ -210,7 +223,9 @@ def run_pipeline(
             },
             "qveris_inputs": {
                 "codes": codes,
-                "market_cap_coverage": int(fundamentals["market_cap"].notna().sum()) if "market_cap" in fundamentals else 0,
+                "market_cap_coverage": int(fundamentals["market_cap"].notna().sum())
+                if "market_cap" in fundamentals
+                else 0,
                 "has_daily_helper": prices_bundle.get("daily") is not None,
             },
         }
@@ -226,11 +241,20 @@ def run_pipeline(
 
 
 def _validate_payload(payload: Mapping[str, Any]) -> None:
-    if "holdings" not in payload or not isinstance(payload["holdings"], list) or not payload["holdings"]:
+    if (
+        "holdings" not in payload
+        or not isinstance(payload["holdings"], list)
+        or not payload["holdings"]
+    ):
         raise ValueError("Payload must include a non-empty holdings list")
     if "params" not in payload or not isinstance(payload["params"], Mapping):
         raise ValueError("Payload must include params")
-    required_params = {"rebalance_frequency", "position_style", "risk_tolerance", "investment_horizon"}
+    required_params = {
+        "rebalance_frequency",
+        "position_style",
+        "risk_tolerance",
+        "investment_horizon",
+    }
     missing = sorted(required_params - set(payload["params"]))
     if missing:
         raise ValueError(f"Missing required params: {', '.join(missing)}")
@@ -267,7 +291,8 @@ def _build_portfolio_payload(
                 "weight_pct": float(row["weight_pct"]),
                 "position_name": meta.get("name") or row.get("name") or row["code"],
                 "vehicle_type": vtype,
-                "asset_class": row.get("asset_class") or ("fund" if vtype == "etf" else "equity"),
+                "asset_class": row.get("asset_class")
+                or ("fund" if vtype == "etf" else "equity"),
                 "region": row.get("region") or "China",
                 "sector_theme": meta.get("sector_theme") or "",
                 "style_tag": row.get("style_tag", ""),
@@ -287,14 +312,26 @@ def _build_fundamentals(
     basics: pd.DataFrame,
     market_caps: pd.DataFrame,
 ) -> pd.DataFrame:
-    base = pd.DataFrame({"ticker": holdings_frame["code"].astype(str).drop_duplicates()})
+    base = pd.DataFrame(
+        {"ticker": holdings_frame["code"].astype(str).drop_duplicates()}
+    )
 
-    basics_df = basics.drop_duplicates(subset=["ticker"]).copy() if not basics.empty else pd.DataFrame(columns=["ticker", "name", "sector_theme"])
-    market_caps_df = market_caps.drop_duplicates(subset=["ticker"]).copy() if not market_caps.empty else pd.DataFrame(columns=["ticker", "market_cap", "name"])
+    basics_df = (
+        basics.drop_duplicates(subset=["ticker"]).copy()
+        if not basics.empty
+        else pd.DataFrame(columns=["ticker", "name", "sector_theme"])
+    )
+    market_caps_df = (
+        market_caps.drop_duplicates(subset=["ticker"]).copy()
+        if not market_caps.empty
+        else pd.DataFrame(columns=["ticker", "market_cap", "name"])
+    )
     if "name" in market_caps_df.columns:
         market_caps_df = market_caps_df.rename(columns={"name": "market_name"})
 
-    merged = base.merge(basics_df, on="ticker", how="left").merge(market_caps_df, on="ticker", how="left")
+    merged = base.merge(basics_df, on="ticker", how="left").merge(
+        market_caps_df, on="ticker", how="left"
+    )
     if "market_name" in merged.columns:
         merged["name"] = merged["name"].fillna(merged["market_name"])
         merged = merged.drop(columns=["market_name"])
@@ -354,6 +391,7 @@ def _write_artifacts(
     *,
     output_dir: str | Path | None,
     include_pdf: bool,
+    internal_data: dict | None = None,
 ) -> dict[str, str]:
     artifact_dir = Path(output_dir) if output_dir else _default_output_dir()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -361,9 +399,15 @@ def _write_artifacts(
     json_path = artifact_dir / "diagnosis_result.json"
     html_path = artifact_dir / "diagnosis_report.html"
     pdf_path = artifact_dir / "diagnosis_report.pdf"
+    internal_path = artifact_dir / "_internal.json"
 
+    serializable = {k: v for k, v in diagnosis_result.items() if k != "_internal"}
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(diagnosis_result, f, ensure_ascii=False, indent=2)
+        json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+    if internal_data is not None:
+        with open(internal_path, "w", encoding="utf-8") as f:
+            json.dump(internal_data, f, ensure_ascii=False, indent=2)
 
     generate_html(dict(diagnosis_result), html_path)
 
@@ -372,6 +416,8 @@ def _write_artifacts(
         "diagnosis_json": str(json_path.resolve()),
         "html_report": str(html_path.resolve()),
     }
+    if internal_data is not None:
+        artifacts["internal_json"] = str(internal_path.resolve())
     if include_pdf:
         convert_html_to_pdf(html_path, pdf_path)
         artifacts["pdf_report"] = str(pdf_path.resolve())
@@ -415,10 +461,11 @@ def _build_internal(captured: dict, payload: Mapping[str, Any]) -> dict:
 
     return {
         "holding_returns": {
-            code: _serialize_series(series)
-            for code, series in holding_returns.items()
+            code: _serialize_series(series) for code, series in holding_returns.items()
         },
-        "benchmark_returns": _serialize_series(benchmark_returns) if benchmark_returns is not None else None,
+        "benchmark_returns": _serialize_series(benchmark_returns)
+        if benchmark_returns is not None
+        else None,
         "holdings": [_serialize_holding(h) for h in holdings],
         "cash_pct": float(cash_pct),
         "portfolio_market_value": float(pmv) if pmv is not None else None,
@@ -457,11 +504,15 @@ def _default_output_dir() -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run one-click portfolio health-check pipeline")
+    parser = argparse.ArgumentParser(
+        description="Run one-click portfolio health-check pipeline"
+    )
     parser.add_argument("payload_file", help="Input payload JSON path")
     parser.add_argument("--output-dir", default="", help="Artifact output directory")
     parser.add_argument("--as-of", default="", help="Anchor date in YYYY-MM-DD")
-    parser.add_argument("--pdf", action="store_true", help="Generate PDF in addition to HTML")
+    parser.add_argument(
+        "--pdf", action="store_true", help="Generate PDF in addition to HTML"
+    )
     parser.add_argument(
         "--emit-artifacts",
         action="store_true",

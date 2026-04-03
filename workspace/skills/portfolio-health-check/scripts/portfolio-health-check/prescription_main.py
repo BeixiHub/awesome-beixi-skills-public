@@ -4,17 +4,19 @@ Bridges the gap between API payload and run_prescription().
 Handles envelope validation, _internal extraction/degradation,
 schema checks, and response wrapping.
 """
+
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import traceback
-from dataclasses import asdict
-from datetime import datetime
+from pathlib import Path
 from typing import Any, Mapping
 
 import pandas as pd
 
-from data_loader import Holding, UserConstraints, parse_constraints
+from data_loader import Holding, parse_constraints
 from diagnosis_schema import validate_diagnosis_data, DiagnosisSchemaError
 from prescription import run_prescription
 
@@ -23,10 +25,15 @@ from prescription import run_prescription
 # _internal validator
 # ---------------------------------------------------------------------------
 
-_INTERNAL_REQUIRED_KEYS = frozenset([
-    "holding_returns", "benchmark_returns", "holdings", "cash_pct",
-    "portfolio_market_value",
-])
+_INTERNAL_REQUIRED_KEYS = frozenset(
+    [
+        "holding_returns",
+        "benchmark_returns",
+        "holdings",
+        "cash_pct",
+        "portfolio_market_value",
+    ]
+)
 
 
 class InternalValidationError(Exception):
@@ -49,9 +56,13 @@ def _validate_internal(internal: dict) -> None:
         raise InternalValidationError("_internal.holding_returns must be dict")
     for code, series_dict in hr.items():
         if not isinstance(series_dict, dict):
-            raise InternalValidationError(f"holding_returns[{code}] must be dict with index/values")
+            raise InternalValidationError(
+                f"holding_returns[{code}] must be dict with index/values"
+            )
         if "index" not in series_dict or "values" not in series_dict:
-            raise InternalValidationError(f"holding_returns[{code}] missing index or values")
+            raise InternalValidationError(
+                f"holding_returns[{code}] missing index or values"
+            )
         if len(series_dict["index"]) != len(series_dict["values"]):
             raise InternalValidationError(
                 f"holding_returns[{code}]: index length {len(series_dict['index'])} "
@@ -62,13 +73,17 @@ def _validate_internal(internal: dict) -> None:
             try:
                 pd.Timestamp(d)
             except (ValueError, TypeError):
-                raise InternalValidationError(f"holding_returns[{code}]: unparseable date '{d}'")
+                raise InternalValidationError(
+                    f"holding_returns[{code}]: unparseable date '{d}'"
+                )
 
     # benchmark_returns (can be null)
     br = internal["benchmark_returns"]
     if br is not None:
         if not isinstance(br, dict):
-            raise InternalValidationError("_internal.benchmark_returns must be dict or null")
+            raise InternalValidationError(
+                "_internal.benchmark_returns must be dict or null"
+            )
         if "index" not in br or "values" not in br:
             raise InternalValidationError("benchmark_returns missing index or values")
         if len(br["index"]) != len(br["values"]):
@@ -86,7 +101,9 @@ def _validate_internal(internal: dict) -> None:
         if not h.get("ticker"):
             raise InternalValidationError(f"holdings[{i}] missing or empty 'ticker'")
         if not isinstance(h.get("weight_pct"), (int, float)):
-            raise InternalValidationError(f"holdings[{i}] missing or non-numeric 'weight_pct'")
+            raise InternalValidationError(
+                f"holdings[{i}] missing or non-numeric 'weight_pct'"
+            )
 
     # cash_pct
     cp = internal["cash_pct"]
@@ -99,14 +116,19 @@ def _validate_internal(internal: dict) -> None:
     pmv = internal["portfolio_market_value"]
     if pmv is not None:
         if not isinstance(pmv, (int, float)):
-            raise InternalValidationError("_internal.portfolio_market_value must be numeric or null")
+            raise InternalValidationError(
+                "_internal.portfolio_market_value must be numeric or null"
+            )
         if pmv <= 0:
-            raise InternalValidationError("_internal.portfolio_market_value must be > 0 when set")
+            raise InternalValidationError(
+                "_internal.portfolio_market_value must be > 0 when set"
+            )
 
 
 # ---------------------------------------------------------------------------
 # Deserializers
 # ---------------------------------------------------------------------------
+
 
 def _deserialize_series(d: dict) -> pd.Series:
     """Deserialize {index, values} back to pd.Series with DatetimeIndex."""
@@ -117,25 +139,28 @@ def _deserialize_holdings(dicts: list[dict]) -> list[Holding]:
     """Deserialize list of dicts back to Holding dataclass instances."""
     result = []
     for d in dicts:
-        result.append(Holding(
-            position_name=d.get("position_name", d.get("ticker", "")),
-            ticker=d["ticker"],
-            weight_pct=float(d["weight_pct"]),
-            vehicle_type=d.get("vehicle_type", "stock"),
-            asset_class=d.get("asset_class", "equity"),
-            region=d.get("region", "China"),
-            sector_theme=d.get("sector_theme", ""),
-            style_tag=d.get("style_tag", ""),
-            lookthrough_group=d.get("lookthrough_group", ""),
-            risk_role=d.get("risk_role", ""),
-            notes=d.get("notes", ""),
-        ))
+        result.append(
+            Holding(
+                position_name=d.get("position_name", d.get("ticker", "")),
+                ticker=d["ticker"],
+                weight_pct=float(d["weight_pct"]),
+                vehicle_type=d.get("vehicle_type", "stock"),
+                asset_class=d.get("asset_class", "equity"),
+                region=d.get("region", "China"),
+                sector_theme=d.get("sector_theme", ""),
+                style_tag=d.get("style_tag", ""),
+                lookthrough_group=d.get("lookthrough_group", ""),
+                risk_role=d.get("risk_role", ""),
+                notes=d.get("notes", ""),
+            )
+        )
     return result
 
 
 # ---------------------------------------------------------------------------
 # Execution info builder
 # ---------------------------------------------------------------------------
+
 
 def _build_execution_info(exec_stats: dict | None, warnings: list[str]) -> dict:
     """Build execution_info from _exec_stats side-channel."""
@@ -155,6 +180,7 @@ def _build_execution_info(exec_stats: dict | None, warnings: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
+
 
 def run_optimization(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Run Phase 3 optimization from API payload.
@@ -227,7 +253,9 @@ def _run_optimization_inner(payload: Mapping[str, Any]) -> dict[str, Any]:
         cash_pct = float(internal["cash_pct"])
         portfolio_market_value = internal["portfolio_market_value"]
     else:
-        warnings.append("_internal missing: rescore/stress skipped, cash_pct defaults to 0")
+        warnings.append(
+            "_internal missing: rescore/stress skipped, cash_pct defaults to 0"
+        )
 
     # Step 5: Parse constraints
     constraints_raw = payload.get("constraints") or {}
@@ -241,7 +269,8 @@ def _run_optimization_inner(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     # Step 6: Run prescription
     result = run_prescription(
-        data, constraints,
+        data,
+        constraints,
         holding_returns=holding_returns,
         benchmark_returns=benchmark_returns,
         holdings=holdings,
@@ -261,3 +290,65 @@ def _run_optimization_inner(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _error(msg: str) -> dict:
     return {"status": "error", "error_message": msg, "data": None}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run Phase 3 portfolio optimization")
+    parser.add_argument(
+        "--diagnosis",
+        required=True,
+        help="Path to diagnosis_result.json from Phase 2",
+    )
+    parser.add_argument(
+        "--internal",
+        default="",
+        help="Path to _internal.json from Phase 2 (optional, enables rescore/stress)",
+    )
+    parser.add_argument(
+        "--constraints",
+        default="{}",
+        help="JSON string of constraints",
+    )
+    parser.add_argument(
+        "--constraints-file",
+        default="",
+        help="Path to constraints JSON file (takes precedence over --constraints)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="",
+        help="Output directory for optimization_result.json",
+    )
+    args = parser.parse_args()
+
+    with open(args.diagnosis, "r", encoding="utf-8") as f:
+        diagnosis_result = json.load(f)
+
+    if args.internal:
+        with open(args.internal, "r", encoding="utf-8") as f:
+            diagnosis_result["_internal"] = json.load(f)
+
+    if args.constraints_file:
+        with open(args.constraints_file, "r", encoding="utf-8") as f:
+            constraints = json.load(f)
+    else:
+        constraints = json.loads(args.constraints)
+
+    payload = {
+        "diagnosis_result": diagnosis_result,
+        "constraints": constraints,
+    }
+
+    result = run_optimization(payload)
+
+    if args.output_dir:
+        out = Path(args.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        with open(out / "optimization_result.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
