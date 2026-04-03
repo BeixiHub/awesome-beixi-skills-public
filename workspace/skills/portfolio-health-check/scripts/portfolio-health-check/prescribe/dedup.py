@@ -101,6 +101,53 @@ def _dedup_key(rec: dict) -> tuple:
     return (category, dest, affected)
 
 
+def resolve_conflicts(recs: list[dict]) -> list[dict]:
+    """Remove contradictory directions on the same ticker across recommendations.
+
+    If ticker X is "reduce" in rec A and "increase" in rec B, drop the
+    conflicting target from the lower-scored recommendation.  If a
+    recommendation loses all its targets, drop the whole recommendation.
+    """
+    # Build map: code -> list of (rec_index, target_index, direction)
+    code_directions: dict[str, list[tuple[int, int, str, float]]] = {}
+    for ri, rec in enumerate(recs):
+        score = rec.get("composite_score") or 0
+        for ti, t in enumerate(rec.get("targets", [])):
+            code = t["code"]
+            direction = t.get("direction", "")
+            code_directions.setdefault(code, []).append((ri, ti, direction, score))
+
+    # Find codes with conflicting directions
+    targets_to_drop: set[tuple[int, int]] = set()
+    for code, entries in code_directions.items():
+        directions = {d for _, _, d, _ in entries}
+        if "reduce" in directions and "increase" in directions:
+            # Keep the direction from the highest-scored rec, drop the rest
+            best = max(entries, key=lambda e: e[3])
+            winning_direction = best[2]
+            for ri, ti, direction, _ in entries:
+                if direction != winning_direction:
+                    targets_to_drop.add((ri, ti))
+
+    if not targets_to_drop:
+        return recs
+
+    # Rebuild recs, removing conflicting targets
+    result = []
+    for ri, rec in enumerate(recs):
+        new_targets = [
+            t for ti, t in enumerate(rec.get("targets", []))
+            if (ri, ti) not in targets_to_drop
+        ]
+        if not new_targets and rec.get("targets"):
+            # All targets removed — drop the whole recommendation
+            continue
+        rec = dict(rec)
+        rec["targets"] = new_targets
+        result.append(rec)
+    return result
+
+
 def deduplicate(recs: list[dict]) -> list[dict]:
     """Merge recommendations with same dedup key."""
     groups: dict[tuple, list[dict]] = {}
@@ -155,7 +202,7 @@ def deduplicate(recs: list[dict]) -> list[dict]:
                 base["targets"] = merged_targets
             merged.append(base)
 
-    return merged
+    return resolve_conflicts(merged)
 
 
 # ---------------------------------------------------------------------------

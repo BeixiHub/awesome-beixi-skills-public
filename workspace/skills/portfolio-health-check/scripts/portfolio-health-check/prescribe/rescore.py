@@ -12,6 +12,7 @@ from compute.risk_metrics import compute_all_metrics
 from compute.concentration import compute_hhi
 
 COST_RATE = 0.003  # single-side cost (commission + stamp duty + slippage)
+MIN_TURNOVER = 0.005  # skip what-if if total turnover < 0.5%
 
 
 def build_whatif_portfolio(
@@ -155,6 +156,13 @@ def _evaluate_plan(
         recommendation,
         constraints,
     )
+
+    # Skip simulation if weight change is immaterial
+    all_codes = set(original_weights) | set(new_weights)
+    turnover = sum(abs(new_weights.get(c, 0) - original_weights.get(c, 0)) for c in all_codes) / 2
+    if turnover < MIN_TURNOVER:
+        return None
+
     available_codes = [c for c in new_weights if c in holding_returns]
     if not available_codes:
         return None

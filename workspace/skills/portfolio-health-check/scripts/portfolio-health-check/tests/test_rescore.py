@@ -146,3 +146,21 @@ class TestRescoreCandidate:
             UserConstraints(), ann_factor=252,
         )
         assert result["verdict"] == "pass"  # empty fallback
+
+    def test_immaterial_turnover_returns_empty(self):
+        """A 0.1% weight change should be skipped (returns empty rescore)."""
+        returns = _make_returns()
+        orig_weights = {"A": 0.30, "B": 0.50, "C": 0.20}
+        orig_metrics = {"ann_volatility": 0.20, "max_drawdown": 0.15, "sharpe_ratio": 0.8}
+        rec = {
+            "targets": [{"code": "A", "to_pct": 29.9}],  # 30% -> 29.9% = 0.1%
+            "instruments": [],
+            "funding_req": "none",
+            "tier": 1,
+        }
+        result = rescore_candidate(
+            rec, orig_weights, 0.0, orig_metrics, returns,
+            UserConstraints(), ann_factor=252,
+        )
+        # Should get empty rescore (no simulation) since turnover < 0.5%
+        assert result["headline"].startswith("缺少")

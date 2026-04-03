@@ -253,7 +253,31 @@ def map_inferences_to_recommendations(
                 )
             )
 
-    return recommendations
+    return _filter_immaterial(recommendations)
+
+
+# Minimum weight change to be considered a meaningful recommendation
+_MIN_CHANGE_PCT = 1.0
+
+
+def _filter_immaterial(recs: list[dict]) -> list[dict]:
+    """Drop targets with < 1% weight change; drop recs that lose all targets."""
+    result = []
+    for rec in recs:
+        targets = rec.get("targets", [])
+        if not targets:
+            result.append(rec)
+            continue
+        material = [
+            t for t in targets
+            if abs(t.get("to_pct", 0) - t.get("from_pct", 0)) >= _MIN_CHANGE_PCT
+        ]
+        if not material:
+            continue
+        rec = dict(rec)
+        rec["targets"] = material
+        result.append(rec)
+    return result
 
 
 def _map_rebalance(

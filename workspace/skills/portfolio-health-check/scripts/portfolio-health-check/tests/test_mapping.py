@@ -178,3 +178,95 @@ class TestMapInferences:
         for r in recs:
             missing = required_keys - set(r.keys())
             assert not missing, f"Missing keys: {missing}"
+
+
+class TestFilterImmaterial:
+    """Targets with < 1% weight change should be filtered out."""
+
+    def test_micro_change_dropped(self):
+        """A target with 20% -> 19.9% (0.1% change) should be removed."""
+        from prescribe.mapping import _filter_immaterial
+
+        recs = [{
+            "category": "rebalance",
+            "targets": [
+                {"code": "A", "direction": "reduce", "from_pct": 20.0, "to_pct": 19.9},
+                {"code": "B", "direction": "increase", "from_pct": 30.0, "to_pct": 30.1},
+            ],
+        }]
+        result = _filter_immaterial(recs)
+        # Both targets < 1% change, entire rec should be dropped
+        assert len(result) == 0
+
+    def test_material_change_kept(self):
+        from prescribe.mapping import _filter_immaterial
+
+        recs = [{
+            "category": "rebalance",
+            "targets": [
+                {"code": "A", "direction": "reduce", "from_pct": 30.0, "to_pct": 20.0},
+                {"code": "B", "direction": "increase", "from_pct": 10.0, "to_pct": 10.5},
+            ],
+        }]
+        result = _filter_immaterial(recs)
+        assert len(result) == 1
+        # Only the material target (A: 10% change) should remain
+        assert len(result[0]["targets"]) == 1
+        assert result[0]["targets"][0]["code"] == "A"
+
+    def test_no_targets_rec_passes_through(self):
+        from prescribe.mapping import _filter_immaterial
+
+        recs = [{"category": "observe", "targets": []}]
+        result = _filter_immaterial(recs)
+        assert len(result) == 1
+
+
+class TestResolveConflicts:
+    """Same ticker with opposite directions across recs should be resolved."""
+
+    def test_opposite_directions_resolved(self):
+        from prescribe.dedup import resolve_conflicts
+
+        recs = [
+            {
+                "composite_score": 0.8,
+                "targets": [
+                    {"code": "600519", "direction": "reduce", "from_pct": 30, "to_pct": 20},
+                ],
+            },
+            {
+                "composite_score": 0.3,
+                "targets": [
+                    {"code": "600519", "direction": "increase", "from_pct": 30, "to_pct": 30.1},
+                    {"code": "300750", "direction": "reduce", "from_pct": 40, "to_pct": 30},
+                ],
+            },
+        ]
+        result = resolve_conflicts(recs)
+        # 600519 "reduce" wins (higher score), "increase" in rec 2 is dropped
+        all_targets = [t for r in result for t in r["targets"]]
+        directions_600519 = [t["direction"] for t in all_targets if t["code"] == "600519"]
+        assert directions_600519 == ["reduce"], f"Expected only reduce, got {directions_600519}"
+
+    def test_no_conflict_unchanged(self):
+        from prescribe.dedup import resolve_conflicts
+
+        recs = [
+            {"composite_score": 0.5, "targets": [{"code": "A", "direction": "reduce", "from_pct": 30, "to_pct": 20}]},
+            {"composite_score": 0.4, "targets": [{"code": "B", "direction": "reduce", "from_pct": 40, "to_pct": 30}]},
+        ]
+        result = resolve_conflicts(recs)
+        assert len(result) == 2
+
+    def test_rec_dropped_when_all_targets_conflicting(self):
+        from prescribe.dedup import resolve_conflicts
+
+        recs = [
+            {"composite_score": 0.9, "targets": [{"code": "X", "direction": "reduce", "from_pct": 30, "to_pct": 20}]},
+            {"composite_score": 0.2, "targets": [{"code": "X", "direction": "increase", "from_pct": 30, "to_pct": 35}]},
+        ]
+        result = resolve_conflicts(recs)
+        # Rec 2 only had X increase, which conflicts — entire rec dropped
+        assert len(result) == 1
+        assert result[0]["composite_score"] == 0.9
