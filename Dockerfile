@@ -14,4 +14,4 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # 系统级安装 portfolio-health-check 依赖（agent 用 python/python3 直接调用）
-RUN pip3 install --break-system-packages pandas numpy requests matplotlib
+RUN uv pip install --system pandas numpy requests matplotlib
