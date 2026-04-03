@@ -220,3 +220,101 @@ def test_run_pipeline_pdf_uses_html_renderer(monkeypatch, tmp_path: Path):
     assert Path(artifacts["pdf_report"]).exists()
     assert calls["html_path"].endswith("diagnosis_report.html")
     assert calls["pdf_path"].endswith("diagnosis_report.pdf")
+
+
+def test_run_pipeline_merges_duplicate_tickers():
+    """600519.SH appears twice (30% + 20%) — must merge to 50%, not keep last."""
+    payload = {
+        "holdings": [
+            {"code": "600519.SH", "weight_pct": 30.0},
+            {"code": "300750.SZ", "weight_pct": 40.0},
+            {"code": "600519.SH", "weight_pct": 20.0},
+        ],
+        "cash_pct": 10.0,
+        "params": {
+            "rebalance_frequency": "monthly",
+            "position_style": "constant_mix",
+            "risk_tolerance": "moderate",
+            "investment_horizon": "1-3y",
+            "portfolio_market_value": 5_000_000,
+        },
+    }
+
+    result = run_pipeline(
+        payload,
+        client=FakeQVerisClient(),
+        as_of="2026-04-01",
+    )
+
+    assert result["status"] == "ok"
+    # 600519 should have merged weight 50%, not 20% or 30%
+    holdings = result["data"]["risk_metrics"]["holdings"]
+    w519 = next(h for h in holdings if h["code"] == "600519.SH")
+    assert abs(w519["weight_pct"] - 50.0) < 0.5, (
+        f"Expected ~50% for merged 600519.SH, got {w519['weight_pct']}"
+    )
+
+
+def test_run_pipeline_cash_in_holdings_not_treated_as_stock():
+    """Cash row in holdings should be extracted, not treated as a stock."""
+    payload = {
+        "holdings": [
+            {"code": "600519.SH", "weight_pct": 50.0},
+            {"code": "300750.SZ", "weight_pct": 30.0},
+            {"code": "CASH", "weight_pct": 20.0},
+        ],
+        "cash_pct": 0.0,
+        "params": {
+            "rebalance_frequency": "monthly",
+            "position_style": "constant_mix",
+            "risk_tolerance": "moderate",
+            "investment_horizon": "1-3y",
+            "portfolio_market_value": 5_000_000,
+        },
+    }
+
+    result = run_pipeline(
+        payload,
+        client=FakeQVerisClient(),
+        as_of="2026-04-01",
+    )
+
+    assert result["status"] == "ok"
+    # No holding should have code "CASH" — it must be extracted as cash
+    holdings = result["data"]["risk_metrics"]["holdings"]
+    codes = [h["code"] for h in holdings]
+    assert "CASH" not in codes, "CASH should not appear as a stock holding"
+    # Only 2 real holdings should remain
+    assert len(holdings) == 2
+
+
+def test_run_pipeline_cash_vehicle_type_in_holdings():
+    """Holdings with vehicle_type='cash' should be extracted as cash."""
+    payload = {
+        "holdings": [
+            {"code": "600519.SH", "weight_pct": 60.0},
+            {"code": "300750.SZ", "weight_pct": 25.0},
+            {"code": "MMF001", "weight_pct": 15.0, "vehicle_type": "cash"},
+        ],
+        "cash_pct": 0.0,
+        "params": {
+            "rebalance_frequency": "monthly",
+            "position_style": "constant_mix",
+            "risk_tolerance": "moderate",
+            "investment_horizon": "1-3y",
+            "portfolio_market_value": 5_000_000,
+        },
+    }
+
+    result = run_pipeline(
+        payload,
+        client=FakeQVerisClient(),
+        as_of="2026-04-01",
+    )
+
+    assert result["status"] == "ok"
+    # MMF001 with vehicle_type=cash should not appear as a stock holding
+    holdings = result["data"]["risk_metrics"]["holdings"]
+    codes = [h["code"] for h in holdings]
+    assert "MMF001" not in codes, "Cash vehicle_type holding should be extracted"
+    assert len(holdings) == 2
