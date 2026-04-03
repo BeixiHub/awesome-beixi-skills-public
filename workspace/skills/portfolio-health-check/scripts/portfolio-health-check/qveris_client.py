@@ -63,13 +63,17 @@ class QVerisClient:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-            raise RuntimeError(f"QVeris HTTP error {exc.code}: {body or exc.reason}") from exc
+            raise RuntimeError(
+                f"QVeris HTTP error {exc.code}: {body or exc.reason}"
+            ) from exc
         except URLError as exc:
             raise RuntimeError(f"QVeris request failed: {exc.reason}") from exc
 
         return json.loads(raw)
 
-    def search_tools(self, query: str, limit: int = 10, session_id: str = "") -> Dict[str, Any]:
+    def search_tools(
+        self, query: str, limit: int = 10, session_id: str = ""
+    ) -> Dict[str, Any]:
         # 将自然语言查询交给 QVeris 的搜索接口，返回候选工具列表。
         payload: Dict[str, Any] = {"query": query, "limit": limit}
         if session_id:
@@ -78,20 +82,143 @@ class QVerisClient:
         url = f"{self.config.base_url}/search"
         return self._post_json(url, payload)
 
-    def lookup_security_profile(self, identifier: str, limit: int = 5, session_id: str = "") -> Dict[str, Any]:
-        # 用多种关键词组合做检索，降低股票简称、代码、行业描述不一致导致的漏搜。
-        queries = [
-            f"company profile stock code industry classification {identifier}",
-            f"stock company information industry profile {identifier}",
-            f"equity profile code name industry {identifier}",
+    def lookup_security_profile(
+        self, identifier: str, limit: int = 5, session_id: str = ""
+    ) -> Dict[str, Any]:
+        # 单次搜索覆盖代码转换、公司信息和行业分类。
+        query = f"stock code company profile industry {identifier}"
+        search_result = self.search_tools(query, limit=limit, session_id=session_id)
+
+        tools_found = []
+        for tool in search_result.get("results", []):
+            tools_found.append(
+                {
+                    "tool_id": tool.get("tool_id", ""),
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", "")[:120],
+                }
+            )
+
+        # Try to auto-run company info tool for actual data
+        profile_data = None
+        search_id = search_result.get("search_id", "")
+        _CANDIDATE_TOOLS = [
+            ("mcp_gildata.companybasicinfo.v1", {"query": identifier}),
+            ("ths_ifind.company_basics.v1", {"codes": identifier}),
         ]
-        results = []
-        for query in queries:
+        for target_tool_id, params in _CANDIDATE_TOOLS:
+            if profile_data is not None:
+                break
+            matched = any(
+                t.get("tool_id") == target_tool_id
+                for t in search_result.get("results", [])
+            )
+            if not (matched and search_id):
+                continue
             try:
-                results.append(self.search_tools(query, limit=limit, session_id=session_id))
-            except Exception as exc:
-                results.append({"query": query, "error": str(exc)})
-        return {"identifier": identifier, "queries": queries, "results": results}
+                run_result = self._run_tool(
+                    tool_id=target_tool_id,
+                    search_id=search_id,
+                    parameters=params,
+                    session_id=session_id,
+                )
+                profile_data = self._extract_profile_from_result(run_result)
+            except Exception:
+                pass  # Try next candidate or fallback
+
+        return {
+            "identifier": identifier,
+            "profile": profile_data,
+            "tools_found": tools_found[:5],
+        }
+
+    def _run_tool(
+        self,
+        tool_id: str,
+        search_id: str,
+        parameters: Dict[str, Any],
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        """Thin wrapper around execute_tool for lookup_security_profile."""
+        return self.execute_tool(
+            tool_id=tool_id,
+            search_id=search_id,
+            parameters=parameters,
+            session_id=session_id,
+        )
+
+    def _extract_profile_from_result(
+        self, raw: Dict[str, Any]
+    ) -> Optional[Dict[str, str]]:
+        """Extract ticker/name/industry from tool execution result.
+
+        Handles two formats:
+        - gildata: markdown table in result.data.results[].table_markdown
+        - ths_ifind: dict rows via _flatten_result_rows
+        """
+        # Try gildata markdown table first
+        try:
+            results_list = raw.get("result", {}).get("data", {}).get("results", [])
+            for item in results_list:
+                md = item.get("table_markdown", "")
+                if not md:
+                    continue
+                lines = [l.strip() for l in md.strip().split("\n") if l.strip()]
+                if len(lines) < 3:
+                    continue
+                # Split keeping empty fields; strip leading/trailing from | borders
+                headers = [h.strip() for h in lines[0].split("|")]
+                values = [v.strip() for v in lines[2].split("|")]
+                # Remove empty strings caused by leading/trailing |
+                if headers and not headers[0]:
+                    headers = headers[1:]
+                if headers and not headers[-1]:
+                    headers = headers[:-1]
+                if values and not values[0]:
+                    values = values[1:]
+                if values and not values[-1]:
+                    values = values[:-1]
+                # Pad values to match headers if trailing fields are empty
+                while len(values) < len(headers):
+                    values.append("")
+                row = dict(zip(headers, values[: len(headers)]))
+                ticker = row.get("股票代码", "")
+                name = row.get("股票名称", "") or row.get("中文名称", "")
+                industry = (
+                    row.get("所属申万行业", "")
+                    or row.get("所属证监会行业", "")
+                    or row.get("所属中信行业", "")
+                )
+                if ticker or name:
+                    return {"ticker": ticker, "name": name, "industry": industry}
+        except Exception:
+            pass
+
+        # Try ths_ifind dict rows
+        try:
+            rows = self._flatten_result_rows(raw)
+            if rows:
+                row = rows[0]
+                return {
+                    "ticker": (
+                        row.get("ths_thscode_stock")
+                        or row.get("thscode")
+                        or row.get("code")
+                        or ""
+                    ),
+                    "name": (
+                        row.get("ths_corp_cn_name_stock") or row.get("name") or ""
+                    ),
+                    "industry": (
+                        row.get("ths_the_ths_industry_stock")
+                        or row.get("ths_the_sw_industry_stock")
+                        or row.get("industry")
+                        or ""
+                    ),
+                }
+        except Exception:
+            pass
+        return None
 
     def build_market_data_plan(self, rebalance_frequency: str) -> Dict[str, Any]:
         # 根据调仓频率选择合适的行情粒度和回溯长度。
@@ -131,13 +258,17 @@ class QVerisClient:
             ],
         }
 
-    def search_market_data_tools(self, rebalance_frequency: str, session_id: str = "", limit: int = 5) -> Dict[str, Any]:
+    def search_market_data_tools(
+        self, rebalance_frequency: str, session_id: str = "", limit: int = 5
+    ) -> Dict[str, Any]:
         # 先生成计划，再逐条执行推荐查询。
         plan = self.build_market_data_plan(rebalance_frequency)
         results = []
         for query in plan["recommended_queries"]:
             try:
-                results.append(self.search_tools(query, limit=limit, session_id=session_id))
+                results.append(
+                    self.search_tools(query, limit=limit, session_id=session_id)
+                )
             except Exception as exc:
                 results.append({"query": query, "error": str(exc)})
         return {"plan": plan, "results": results}
@@ -311,7 +442,9 @@ class QVerisClient:
             "selected_datasets": selected,
         }
 
-    def build_ths_coverage_plan(self, codes: str, as_of: Optional[str] = None) -> Dict[str, Any]:
+    def build_ths_coverage_plan(
+        self, codes: str, as_of: Optional[str] = None
+    ) -> Dict[str, Any]:
         # 需要“全覆盖”时，返回所有可用时间跨度，供一次性抓取使用。
         anchor = self._parse_date(as_of)
         intraday_start = self._shift_months(anchor, 3)
@@ -330,15 +463,78 @@ class QVerisClient:
                     interval="15",
                     note="15分钟数据，回溯3个月",
                 ),
-                self._build_ths_history_spec("daily_1y", codes, self._format_ymd(one_year_start), self._format_ymd(anchor), "D", "日线数据，回溯1年"),
-                self._build_ths_history_spec("weekly_1y", codes, self._format_ymd(one_year_start), self._format_ymd(anchor), "W", "周线数据，回溯1年"),
-                self._build_ths_history_spec("monthly_1y", codes, self._format_ymd(one_year_start), self._format_ymd(anchor), "M", "月线数据，回溯1年"),
-                self._build_ths_history_spec("daily_2y", codes, self._format_ymd(two_year_start), self._format_ymd(anchor), "D", "日线数据，回溯2年"),
-                self._build_ths_history_spec("weekly_3y", codes, self._format_ymd(three_year_start), self._format_ymd(anchor), "W", "周线数据，回溯3年"),
-                self._build_ths_history_spec("monthly_5y", codes, self._format_ymd(five_year_start), self._format_ymd(anchor), "M", "月线数据，回溯5年"),
-                self._build_ths_history_spec("daily_3m", codes, self._format_ymd(intraday_start), self._format_ymd(anchor), "D", "日线数据，回溯3个月"),
-                self._build_ths_history_spec("daily_3y", codes, self._format_ymd(three_year_start), self._format_ymd(anchor), "D", "日线数据，回溯3年"),
-                self._build_ths_history_spec("daily_5y", codes, self._format_ymd(five_year_start), self._format_ymd(anchor), "D", "日线数据，回溯5年"),
+                self._build_ths_history_spec(
+                    "daily_1y",
+                    codes,
+                    self._format_ymd(one_year_start),
+                    self._format_ymd(anchor),
+                    "D",
+                    "日线数据，回溯1年",
+                ),
+                self._build_ths_history_spec(
+                    "weekly_1y",
+                    codes,
+                    self._format_ymd(one_year_start),
+                    self._format_ymd(anchor),
+                    "W",
+                    "周线数据，回溯1年",
+                ),
+                self._build_ths_history_spec(
+                    "monthly_1y",
+                    codes,
+                    self._format_ymd(one_year_start),
+                    self._format_ymd(anchor),
+                    "M",
+                    "月线数据，回溯1年",
+                ),
+                self._build_ths_history_spec(
+                    "daily_2y",
+                    codes,
+                    self._format_ymd(two_year_start),
+                    self._format_ymd(anchor),
+                    "D",
+                    "日线数据，回溯2年",
+                ),
+                self._build_ths_history_spec(
+                    "weekly_3y",
+                    codes,
+                    self._format_ymd(three_year_start),
+                    self._format_ymd(anchor),
+                    "W",
+                    "周线数据，回溯3年",
+                ),
+                self._build_ths_history_spec(
+                    "monthly_5y",
+                    codes,
+                    self._format_ymd(five_year_start),
+                    self._format_ymd(anchor),
+                    "M",
+                    "月线数据，回溯5年",
+                ),
+                self._build_ths_history_spec(
+                    "daily_3m",
+                    codes,
+                    self._format_ymd(intraday_start),
+                    self._format_ymd(anchor),
+                    "D",
+                    "日线数据，回溯3个月",
+                ),
+                self._build_ths_history_spec(
+                    "daily_3y",
+                    codes,
+                    self._format_ymd(three_year_start),
+                    self._format_ymd(anchor),
+                    "D",
+                    "日线数据，回溯3年",
+                ),
+                self._build_ths_history_spec(
+                    "daily_5y",
+                    codes,
+                    self._format_ymd(five_year_start),
+                    self._format_ymd(anchor),
+                    "D",
+                    "日线数据，回溯5年",
+                ),
             ],
         }
         return plan
@@ -350,15 +546,21 @@ class QVerisClient:
             if not isinstance(row, dict):
                 continue
             time_value = row.get("time") or row.get("date")
-            normalized.append({
-                "code": row.get("thscode") or row.get("security_code") or row.get("code"),
-                "time": time_value,
-                "close": row.get("close") or row.get("收盘价"),
-                "volume": row.get("volume") or row.get("成交量"),
-            })
+            normalized.append(
+                {
+                    "code": row.get("thscode")
+                    or row.get("security_code")
+                    or row.get("code"),
+                    "time": time_value,
+                    "close": row.get("close") or row.get("收盘价"),
+                    "volume": row.get("volume") or row.get("成交量"),
+                }
+            )
         return normalized
 
-    def _extract_ths_series(self, payload: Dict[str, Any]) -> list[list[Dict[str, Any]]]:
+    def _extract_ths_series(
+        self, payload: Dict[str, Any]
+    ) -> list[list[Dict[str, Any]]]:
         # 兼容不同返回层级：result.data 可能是单条列表，也可能是多段列表。
         container = payload.get("result", payload)
         data = container.get("data", []) if isinstance(container, dict) else []
@@ -390,7 +592,9 @@ class QVerisClient:
         max_response_size: int = 102400,
     ) -> Dict[str, Any]:
         search_result = self.search_tools(query, limit=limit, session_id=session_id)
-        matched = any(tool.get("tool_id") == tool_id for tool in search_result.get("results", []))
+        matched = any(
+            tool.get("tool_id") == tool_id for tool in search_result.get("results", [])
+        )
         if not matched:
             raise RuntimeError(f"Tool {tool_id} not found for query: {query}")
         return self.execute_tool(
@@ -454,7 +658,11 @@ class QVerisClient:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-        return df[["code", "date", "close", "volume"]].dropna(subset=["code", "date", "close"]).reset_index(drop=True)
+        return (
+            df[["code", "date", "close", "volume"]]
+            .dropna(subset=["code", "date", "close"])
+            .reset_index(drop=True)
+        )
 
     def fetch_minute_quotation(
         self,
@@ -490,7 +698,11 @@ class QVerisClient:
         df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-        return df[["code", "datetime", "close", "volume"]].dropna(subset=["code", "datetime", "close"]).reset_index(drop=True)
+        return (
+            df[["code", "datetime", "close", "volume"]]
+            .dropna(subset=["code", "datetime", "close"])
+            .reset_index(drop=True)
+        )
 
     def fetch_market_caps(
         self,
@@ -512,11 +724,15 @@ class QVerisClient:
         rows = self._flatten_result_rows(payload)
         normalized = []
         for row in rows:
-            ticker = row.get("thscode") or row.get("ths_thscode_stock") or row.get("code")
+            ticker = (
+                row.get("thscode") or row.get("ths_thscode_stock") or row.get("code")
+            )
             normalized.append(
                 {
                     "ticker": ticker,
-                    "market_cap": row.get("总市值") or row.get("market_cap") or row.get("总市值(元)"),
+                    "market_cap": row.get("总市值")
+                    or row.get("market_cap")
+                    or row.get("总市值(元)"),
                     "name": row.get("证券简称") or row.get("简称") or row.get("name"),
                 }
             )
@@ -544,11 +760,15 @@ class QVerisClient:
         rows = self._flatten_result_rows(payload)
         normalized = []
         for row in rows:
-            ticker = row.get("ths_thscode_stock") or row.get("thscode") or row.get("code")
+            ticker = (
+                row.get("ths_thscode_stock") or row.get("thscode") or row.get("code")
+            )
             normalized.append(
                 {
                     "ticker": ticker,
-                    "name": row.get("ths_corp_cn_name_stock") or row.get("证券简称") or row.get("name"),
+                    "name": row.get("ths_corp_cn_name_stock")
+                    or row.get("证券简称")
+                    or row.get("name"),
                     "sector_theme": (
                         row.get("ths_the_ths_industry_stock")
                         or row.get("ths_the_sw_industry_stock")
@@ -584,8 +804,14 @@ class QVerisClient:
 
     def _summarize_series(self, series: list[Dict[str, Any]]) -> Dict[str, Any]:
         # 对单条序列做轻量汇总，便于快速查看区间特征。
-        closes = [row["close"] for row in series if isinstance(row.get("close"), (int, float))]
-        volumes = [row["volume"] for row in series if isinstance(row.get("volume"), (int, float))]
+        closes = [
+            row["close"] for row in series if isinstance(row.get("close"), (int, float))
+        ]
+        volumes = [
+            row["volume"]
+            for row in series
+            if isinstance(row.get("volume"), (int, float))
+        ]
         return {
             "start": series[0]["time"] if series else "",
             "end": series[-1]["time"] if series else "",
@@ -665,7 +891,9 @@ class QVerisClient:
                 for spec in datasets
             ],
         }
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
 
     def _load_artifact(self, artifact_path: Path) -> Optional[Dict[str, Any]]:
         # 读取已保存的单个数据集产物。
@@ -677,7 +905,9 @@ class QVerisClient:
         except Exception:
             return None
 
-    def _artifact_matches_spec(self, artifact: Dict[str, Any], spec: Dict[str, Any]) -> bool:
+    def _artifact_matches_spec(
+        self, artifact: Dict[str, Any], spec: Dict[str, Any]
+    ) -> bool:
         # 只有格式、数据集和参数都一致，才允许直接复用缓存。
         if not isinstance(artifact, dict):
             return False
@@ -691,12 +921,18 @@ class QVerisClient:
             and artifact_spec.get("parameters") == spec.get("parameters")
         )
 
-    def _artifact_to_result(self, artifact: Dict[str, Any], artifact_path: Path) -> Dict[str, Any]:
+    def _artifact_to_result(
+        self, artifact: Dict[str, Any], artifact_path: Path
+    ) -> Dict[str, Any]:
         # 将缓存产物转换为和实时执行一致的结果结构。
         rows = artifact.get("rows", artifact.get("normalized_series", []))
         summaries = artifact.get("summaries", [])
         if not summaries and isinstance(rows, list):
-            summaries = [self._summarize_series(series) for series in rows if isinstance(series, list)]
+            summaries = [
+                self._summarize_series(series)
+                for series in rows
+                if isinstance(series, list)
+            ]
         return {
             "artifact_path": str(artifact_path),
             "summaries": summaries,
@@ -758,7 +994,10 @@ class QVerisClient:
                         continue
 
                     # 通过文件名或 spec 判断是分钟线还是日线，决定时间字段名。
-                    is_hf = "minute" in artifact_path.name or artifact.get("spec", {}).get("tool_kind") == "minute"
+                    is_hf = (
+                        "minute" in artifact_path.name
+                        or artifact.get("spec", {}).get("tool_kind") == "minute"
+                    )
                     time_key = "datetime" if is_hf else "date"
 
                     rows_out.append(
@@ -775,7 +1014,7 @@ class QVerisClient:
                 "output_csv": str(output_path),
                 "rows": 0,
                 "artifacts_used": [str(p) for p in resolved_artifacts],
-                "error": "No data rows found in artifacts"
+                "error": "No data rows found in artifacts",
             }
 
         # 直接用首行字段名，兼容 date / datetime 两种输出结构。
@@ -807,11 +1046,17 @@ class QVerisClient:
             datasets = plan["coverage"]
         else:
             if not rebalance_frequency:
-                raise ValueError("rebalance_frequency is required unless collect_all is true")
-            plan = self.build_ths_frequency_plan(rebalance_frequency, codes, as_of=as_of)
+                raise ValueError(
+                    "rebalance_frequency is required unless collect_all is true"
+                )
+            plan = self.build_ths_frequency_plan(
+                rebalance_frequency, codes, as_of=as_of
+            )
             datasets = plan["selected_datasets"]
 
-        run_fingerprint = self._build_run_fingerprint(codes, rebalance_frequency, as_of, collect_all, datasets)
+        run_fingerprint = self._build_run_fingerprint(
+            codes, rebalance_frequency, as_of, collect_all, datasets
+        )
         manifest = self._load_artifact_manifest()
         if manifest.get("fingerprint") != run_fingerprint:
             self._clear_artifact_cache()
@@ -820,7 +1065,9 @@ class QVerisClient:
                 "fingerprint": run_fingerprint,
                 "updated_at": self._now_iso(),
                 "codes": codes,
-                "rebalance_frequency": rebalance_frequency if rebalance_frequency else "",
+                "rebalance_frequency": rebalance_frequency
+                if rebalance_frequency
+                else "",
                 "as_of": as_of if as_of else "",
                 "collect_all": collect_all,
             }
@@ -831,22 +1078,28 @@ class QVerisClient:
 
         for spec in datasets:
             artifact_filename = f"{spec['dataset_id']}_{codes.replace(',', '_')}.json"
-            artifact_path = Path(self.config.state_file).parent / "artifacts" / artifact_filename
+            artifact_path = (
+                Path(self.config.state_file).parent / "artifacts" / artifact_filename
+            )
             cached_artifact = self._load_artifact(artifact_path)
             if cached_artifact and self._artifact_matches_spec(cached_artifact, spec):
                 cached_result = self._artifact_to_result(cached_artifact, artifact_path)
-                cached_result.update({
-                    "dataset_id": spec["dataset_id"],
-                    "tool_id": spec["tool_id"],
-                    "parameters": spec["parameters"],
-                })
+                cached_result.update(
+                    {
+                        "dataset_id": spec["dataset_id"],
+                        "tool_id": spec["tool_id"],
+                        "parameters": spec["parameters"],
+                    }
+                )
                 executed.append(cached_result)
                 continue
 
             tool_kind = spec["tool_kind"]
             if tool_kind not in search_cache:
                 query = spec["query"]
-                search_cache[tool_kind] = self.search_tools(query, limit=limit, session_id=session_id)
+                search_cache[tool_kind] = self.search_tools(
+                    query, limit=limit, session_id=session_id
+                )
 
             search_result = search_cache[tool_kind]
             chosen = None
@@ -856,13 +1109,15 @@ class QVerisClient:
                     break
 
             if not chosen:
-                executed.append({
-                    "dataset_id": spec["dataset_id"],
-                    "tool_id": spec["tool_id"],
-                    "parameters": spec["parameters"],
-                    "error": "matching tool not found in search results",
-                    "search_result": search_result,
-                })
+                executed.append(
+                    {
+                        "dataset_id": spec["dataset_id"],
+                        "tool_id": spec["tool_id"],
+                        "parameters": spec["parameters"],
+                        "error": "matching tool not found in search results",
+                        "search_result": search_result,
+                    }
+                )
                 continue
 
             payload = self.execute_tool(
@@ -879,7 +1134,9 @@ class QVerisClient:
                     payload["result"]["data"] = full_content
 
             series_list = self._extract_ths_series(payload)
-            normalized_series = [self._normalize_ths_series(series) for series in series_list]
+            normalized_series = [
+                self._normalize_ths_series(series) for series in series_list
+            ]
             summaries = [self._summarize_series(series) for series in normalized_series]
             artifact_path = self._save_artifact(
                 artifact_filename,
@@ -894,15 +1151,17 @@ class QVerisClient:
                 },
             )
 
-            executed.append({
-                "dataset_id": spec["dataset_id"],
-                "tool_id": spec["tool_id"],
-                "parameters": spec["parameters"],
-                "search_id": search_result["search_id"],
-                "artifact_path": artifact_path,
-                "summaries": summaries,
-                "series_count": len(normalized_series),
-            })
+            executed.append(
+                {
+                    "dataset_id": spec["dataset_id"],
+                    "tool_id": spec["tool_id"],
+                    "parameters": spec["parameters"],
+                    "search_id": search_result["search_id"],
+                    "artifact_path": artifact_path,
+                    "summaries": summaries,
+                    "series_count": len(normalized_series),
+                }
+            )
 
         state = self.load_state()
         state["version"] = "1.0"
@@ -948,7 +1207,9 @@ class QVerisClient:
             json.dump(state, f, ensure_ascii=False, indent=2)
         return state
 
-    def update_stage1_state(self, identifier: str, lookup_result: Dict[str, Any]) -> Dict[str, Any]:
+    def update_stage1_state(
+        self, identifier: str, lookup_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
         # 保存第一阶段的标的识别结果。
         state = self.load_state()
         state["version"] = "1.0"
@@ -960,7 +1221,9 @@ class QVerisClient:
         state["updated_at"] = self._now_iso()
         return self.save_state(state)
 
-    def update_stage2_state(self, rebalance_frequency: str, market_result: Dict[str, Any]) -> Dict[str, Any]:
+    def update_stage2_state(
+        self, rebalance_frequency: str, market_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
         # 保存第二阶段的市场数据计划/搜索结果。
         state = self.load_state()
         state["version"] = "1.0"
@@ -1008,33 +1271,61 @@ def main() -> None:
     search_parser.add_argument("--limit", type=int, default=10)
     search_parser.add_argument("--session-id", default="")
 
-    lookup_parser = subparsers.add_parser("lookup", help="Lookup stock/company profile tools")
-    lookup_parser.add_argument("identifier", help="Stock name or code to identify")
+    lookup_parser = subparsers.add_parser(
+        "lookup", aliases=["identify"], help="Lookup stock/company profile tools"
+    )
+    lookup_parser.add_argument(
+        "identifier", nargs="+", help="Stock name(s) or code(s) to identify"
+    )
     lookup_parser.add_argument("--limit", type=int, default=5)
     lookup_parser.add_argument("--session-id", default="")
 
-    market_parser = subparsers.add_parser("market-plan", help="Build market data plan by rebalance frequency")
-    market_parser.add_argument("rebalance_frequency", help="intraday|weekly|monthly|quarterly|buy_and_hold")
+    market_parser = subparsers.add_parser(
+        "market-plan", help="Build market data plan by rebalance frequency"
+    )
+    market_parser.add_argument(
+        "rebalance_frequency", help="intraday|weekly|monthly|quarterly|buy_and_hold"
+    )
 
-    market_search_parser = subparsers.add_parser("market-search", help="Search market data tools by rebalance frequency")
-    market_search_parser.add_argument("rebalance_frequency", help="intraday|weekly|monthly|quarterly|buy_and_hold")
+    market_search_parser = subparsers.add_parser(
+        "market-search", help="Search market data tools by rebalance frequency"
+    )
+    market_search_parser.add_argument(
+        "rebalance_frequency", help="intraday|weekly|monthly|quarterly|buy_and_hold"
+    )
     market_search_parser.add_argument("--limit", type=int, default=5)
     market_search_parser.add_argument("--session-id", default="")
 
-    ths_collect_parser = subparsers.add_parser("ths-collect", help="Collect THS quotation data and persist it")
+    ths_collect_parser = subparsers.add_parser(
+        "ths-collect", help="Collect THS quotation data and persist it"
+    )
     ths_collect_parser.add_argument("codes", help="Comma-separated THS codes")
-    ths_collect_parser.add_argument("--rebalance-frequency", default="", help="intraday|weekly|monthly|quarterly|buy_and_hold")
-    ths_collect_parser.add_argument("--as-of", dest="as_of", default="", help="Reference date in YYYY-MM-DD")
-    ths_collect_parser.add_argument("--all", action="store_true", help="Collect all supported THS timeframes")
+    ths_collect_parser.add_argument(
+        "--rebalance-frequency",
+        default="",
+        help="intraday|weekly|monthly|quarterly|buy_and_hold",
+    )
+    ths_collect_parser.add_argument(
+        "--as-of", dest="as_of", default="", help="Reference date in YYYY-MM-DD"
+    )
+    ths_collect_parser.add_argument(
+        "--all", action="store_true", help="Collect all supported THS timeframes"
+    )
     ths_collect_parser.add_argument("--session-id", default="")
     ths_collect_parser.add_argument("--limit", type=int, default=10)
 
     state_parser = subparsers.add_parser("state", help="Inspect saved structured state")
     state_subparsers = state_parser.add_subparsers(dest="state_command", required=True)
-    state_show_parser = state_subparsers.add_parser("show", help="Show current saved state")
-    state_path_parser = state_subparsers.add_parser("path", help="Print state file path")
+    state_show_parser = state_subparsers.add_parser(
+        "show", help="Show current saved state"
+    )
+    state_path_parser = state_subparsers.add_parser(
+        "path", help="Print state file path"
+    )
 
-    export_parser = subparsers.add_parser("export-csv", help="Export close/volume rows to CSV")
+    export_parser = subparsers.add_parser(
+        "export-csv", help="Export close/volume rows to CSV"
+    )
     export_parser.add_argument("--output", required=True, help="Output CSV path")
     export_parser.add_argument(
         "--artifacts",
@@ -1046,9 +1337,19 @@ def main() -> None:
     execute_parser = subparsers.add_parser("execute", help="Execute a QVeris tool")
     execute_parser.add_argument("tool_id", help="Tool id from search results")
     execute_parser.add_argument("search_id", help="Search id from the search call")
-    execute_parser.add_argument("parameters", nargs="?", help="JSON string of tool parameters")
-    execute_parser.add_argument("--parameters-json", dest="parameters_json", help="JSON string of tool parameters")
-    execute_parser.add_argument("--parameters-file", dest="parameters_file", help="Path to a JSON file of tool parameters")
+    execute_parser.add_argument(
+        "parameters", nargs="?", help="JSON string of tool parameters"
+    )
+    execute_parser.add_argument(
+        "--parameters-json",
+        dest="parameters_json",
+        help="JSON string of tool parameters",
+    )
+    execute_parser.add_argument(
+        "--parameters-file",
+        dest="parameters_file",
+        help="Path to a JSON file of tool parameters",
+    )
     execute_parser.add_argument("--session-id", default="")
     execute_parser.add_argument("--max-response-size", type=int, default=102400)
 
@@ -1056,14 +1357,21 @@ def main() -> None:
     client = QVerisClient()
 
     if args.command == "search":
-        result = client.search_tools(args.query, limit=args.limit, session_id=args.session_id)
+        result = client.search_tools(
+            args.query, limit=args.limit, session_id=args.session_id
+        )
         _print_json(result)
         return
 
-    if args.command == "lookup":
-        result = client.lookup_security_profile(args.identifier, limit=args.limit, session_id=args.session_id)
-        client.update_stage1_state(args.identifier, result)
-        _print_json(result)
+    if args.command in ("lookup", "identify"):
+        results = []
+        for ident in args.identifier:
+            r = client.lookup_security_profile(
+                ident, limit=args.limit, session_id=args.session_id
+            )
+            client.update_stage1_state(ident, r)
+            results.append(r)
+        _print_json(results if len(results) > 1 else results[0])
         return
 
     if args.command == "market-plan":
@@ -1115,7 +1423,9 @@ def main() -> None:
             with open(args.parameters_file, "r", encoding="utf-8-sig") as f:
                 params_source = f.read()
         if not params_source:
-            raise SystemExit("Provide parameters with --parameters-json, --parameters-file, or the positional parameters argument")
+            raise SystemExit(
+                "Provide parameters with --parameters-json, --parameters-file, or the positional parameters argument"
+            )
 
         params = json.loads(params_source.lstrip("\ufeff"))
         result = client.execute_tool(

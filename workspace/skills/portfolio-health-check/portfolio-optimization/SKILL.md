@@ -53,33 +53,51 @@ description: 用于基于约束条件生成投资组合优化处方。调用 pre
 
 从用户处收集上述约束参数。如果参数不足，先追问最少必要信息。
 
-### Step 2：组装 payload 并调用 `prescription_main.py`
+### Step 2：组装约束并通过 CLI 调用优化
 
-用 Phase 2 的完整输出（`run_pipeline()` 返回值）和约束构建 payload：
+用 Phase 2 的输出文件和约束构建调用。
 
-```python
-from prescription_main import run_optimization
+**Step 2a：写约束文件**
 
-payload = {
-    "diagnosis_result": phase2_result,  # run_pipeline() 的完整返回值，原样传入
-    "constraints": {
-        "allowed_markets": ["A-share"],
-        "allowed_instruments": ["stock", "etf"],
-        "additional_capital_ratio": "10-30%",
-        "objectives": ["growth"],
-    },
+用 exec 工具把约束写到 `/tmp/portfolio_constraints.json`：
+
+```json
+{
+    "allowed_markets": ["A-share"],
+    "allowed_instruments": ["stock", "etf"],
+    "additional_capital_ratio": "10-30%",
+    "objectives": ["growth"]
 }
-
-result = run_optimization(payload)
 ```
 
-**`run_optimization()` 内部自动完成：**
+**Step 2b：调用 CLI**
+
+```bash
+cd ~/.openclaw/workspace/skills/portfolio-health-check && \
+  python scripts/portfolio-health-check/prescription_main.py \
+  --diagnosis /tmp/portfolio_output/diagnosis_result.json \
+  --internal /tmp/portfolio_output/_internal.json \
+  --constraints-file /tmp/portfolio_constraints.json \
+  --output-dir /tmp/optimization_output
+```
+
+> - `--diagnosis` 和 `--internal` 指向 Phase 2 `--output-dir` 里的文件
+> - 如果 `_internal.json` 不存在，可省略 `--internal`（优化结果会降级，跳过回验和压力测试）
+> - 执行成功后，`/tmp/optimization_output/optimization_result.json` 包含完整结果
+
+**Step 2c：读取结果**
+
+```bash
+cat /tmp/optimization_output/optimization_result.json
+```
+
+**`prescription_main.py` CLI 内部自动完成：**
 - 从 `diagnosis_result` 剥出诊断数据和 `_internal`（returns/holdings）
 - 解析约束
 - 运行 Phase 3 推理、映射、回验、压力测试
 - 返回结构化处方结果
 
-**不要手动调用 QVeris 或拉取数据。** Phase 3 的所有数据来自 Phase 2 输出的 `_internal`。
+**不要手动调用 QVeris 或拉取数据。** Phase 3 的所有数据来自 Phase 2 输出。
 
 ### Step 3：处理返回结果
 

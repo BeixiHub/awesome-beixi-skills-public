@@ -1,0 +1,75 @@
+{
+  "models": {
+    "providers": {
+      "moonshot": {
+        "baseUrl": "https://api.moonshot.cn/v1",
+        "apiKey": "${MOONSHOT_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "kimi-k2.5", "name": "Kimi K2.5", "maxTokens": 16384 },
+          { "id": "moonshot-v1-128k", "name": "Kimi 128K" }
+        ]
+      },
+      "ark": {
+        "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "apiKey": "${ARK_API_KEY}",
+        "api": "openai-completions",
+        "models": [{ "id": "ark-code-latest", "name": "Ark Code Latest" }]
+      }
+    }
+  },
+
+  "agents": {
+    "defaults": {
+      "workspace": "/root/.openclaw/workspace",
+      "model": {
+        "primary": "moonshot/kimi-k2.5",
+        "fallbacks": ["moonshot/moonshot-v1-128k"]
+      },
+      "compaction": { "mode": "safeguard" },
+      "maxConcurrent": 4,
+      "subagents": { "maxConcurrent": 4 }
+    }
+  },
+
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "password"
+    },
+    "controlUi": {
+      "allowedOrigins": ["*"],
+      "allowInsecureAuth": true
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send",
+        "sms.search"
+      ]
+    }
+  },
+
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+
+  "tools": {
+    "profile": "coding"
+  },
+
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": false
+  },
+
+  "plugins": {}
+}
