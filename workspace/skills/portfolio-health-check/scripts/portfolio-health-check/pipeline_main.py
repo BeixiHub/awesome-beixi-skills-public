@@ -139,6 +139,20 @@ def run_pipeline(
         scenario = build_pipeline_scenario(payload["params"])
         anchor = _parse_anchor(as_of)
         holdings_frame = _holdings_frame(payload)
+
+        # Separate cash rows before any aggregation
+        cash_mask = holdings_frame["code"].apply(_is_cash_code)
+        if "vehicle_type" in holdings_frame.columns:
+            cash_mask = cash_mask | (holdings_frame["vehicle_type"].str.lower() == "cash")
+        cash_from_holdings = float(holdings_frame.loc[cash_mask, "weight_pct"].sum())
+        holdings_frame = holdings_frame.loc[~cash_mask].copy()
+
+        # Merge duplicate tickers (e.g. 600519 30% + 20% -> 50%)
+        holdings_frame = (
+            holdings_frame.groupby("code", as_index=False)
+            .agg({c: "first" if c != "weight_pct" else "sum" for c in holdings_frame.columns})
+        )
+
         codes = holdings_frame["code"].dropna().astype(str).tolist()
 
         prices_bundle = _fetch_price_bundle(qveris, codes, scenario, anchor)
@@ -159,7 +173,7 @@ def run_pipeline(
             indicators="close",
         )
 
-        portfolio_payload = _build_portfolio_payload(payload, holdings_frame, basics)
+        portfolio_payload = _build_portfolio_payload(payload, holdings_frame, basics, cash_from_holdings)
         captured: dict = {}
         diagnosis_result = run_diagnosis(
             scenario,
@@ -237,6 +251,7 @@ def _build_portfolio_payload(
     payload: Mapping[str, Any],
     holdings_frame: pd.DataFrame,
     basics: pd.DataFrame,
+    cash_from_holdings: float = 0.0,
 ) -> dict[str, Any]:
     basics_map = {
         row["ticker"]: row
@@ -245,22 +260,25 @@ def _build_portfolio_payload(
     records: list[dict[str, Any]] = []
     for row in holdings_frame.to_dict("records"):
         meta = basics_map.get(row["code"], {})
+        vtype = row.get("vehicle_type") or _infer_vehicle_type(row["code"])
         records.append(
             {
                 "code": row["code"],
                 "weight_pct": float(row["weight_pct"]),
                 "position_name": meta.get("name") or row.get("name") or row["code"],
-                "vehicle_type": _infer_vehicle_type(row["code"]),
-                "asset_class": "fund" if _infer_vehicle_type(row["code"]) == "etf" else "equity",
-                "region": "China",
+                "vehicle_type": vtype,
+                "asset_class": row.get("asset_class") or ("fund" if vtype == "etf" else "equity"),
+                "region": row.get("region") or "China",
                 "sector_theme": meta.get("sector_theme") or "",
                 "style_tag": row.get("style_tag", ""),
                 "lookthrough_group": row.get("lookthrough_group", ""),
             }
         )
+    # Combine root-level cash_pct with any cash rows extracted from holdings
+    root_cash = float(payload.get("cash_pct", 0.0) or 0.0)
     return {
         "holdings": records,
-        "cash_pct": float(payload.get("cash_pct", 0.0) or 0.0),
+        "cash_pct": root_cash + cash_from_holdings,
     }
 
 
@@ -405,6 +423,11 @@ def _build_internal(captured: dict, payload: Mapping[str, Any]) -> dict:
         "cash_pct": float(cash_pct),
         "portfolio_market_value": float(pmv) if pmv is not None else None,
     }
+
+
+def _is_cash_code(code: str) -> bool:
+    """Detect cash-like holdings by code or vehicle_type."""
+    return code.upper() in ("CASH", "现金", "—", "-", "")
 
 
 def _infer_vehicle_type(code: str) -> str:

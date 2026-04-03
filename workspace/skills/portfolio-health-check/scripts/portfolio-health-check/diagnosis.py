@@ -124,6 +124,20 @@ def run_diagnosis(
     if daily_prices_df is not None:
         daily_prices_by, daily_volumes_by = _split(daily_prices_df)
 
+    # ── Filter weights to codes with price data, redistribute missing ──
+    missing_codes = [c for c in weights if c not in main_prices_by]
+    if missing_codes:
+        missing_sum = sum(weights[c] for c in missing_codes)
+        weights = {c: w for c, w in weights.items() if c in main_prices_by}
+        remaining_sum = sum(weights.values())
+        if remaining_sum > 0:
+            scale = (remaining_sum + missing_sum) / remaining_sum
+            weights = {c: w * scale for c, w in weights.items()}
+        warnings.append(
+            f"以下标的无价格数据，其权重({missing_sum:.1%})已按比例分配至其余持仓: "
+            + ", ".join(missing_codes)
+        )
+
     # For factors, always use daily
     factor_prices = daily_prices_by if daily_prices_by else main_prices_by
     factor_volumes = daily_volumes_by if daily_volumes_by else main_volumes_by
