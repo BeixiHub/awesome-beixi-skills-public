@@ -4,7 +4,7 @@ Flow:
 1. Normalize API payload
 2. Pull market data from QVeris
 3. Run diagnosis with direct dict/DataFrame inputs
-4. Generate HTML/PDF report artifacts
+4. Return structured client text, with optional HTML/PDF artifacts
 """
 from __future__ import annotations
 
@@ -19,11 +19,13 @@ from typing import Any, Mapping
 import pandas as pd
 
 from compute.benchmark import BENCHMARK_NAMES, select_benchmark_details
+from data_loader import Holding, load_and_normalize_portfolio
 from date_utils import shift_months, shift_years, format_ymd
 from diagnosis import run_diagnosis
 from generate_report_html import generate_html
 from html_pdf import convert_html_to_pdf
 from qveris_client import QVerisClient
+from structured_output import build_diagnosis_client_output
 
 STYLE_MAP = {
     "market_timing": "timing_rotation",
@@ -127,6 +129,7 @@ def run_pipeline(
     client: QVerisClient | None = None,
     as_of: str | None = None,
     include_pdf: bool = False,
+    emit_artifacts: bool = False,
 ) -> dict[str, Any]:
     """Run the full portfolio health-check pipeline from API payload."""
     try:
@@ -157,22 +160,33 @@ def run_pipeline(
         )
 
         portfolio_payload = _build_portfolio_payload(payload, holdings_frame, basics)
+        captured: dict = {}
         diagnosis_result = run_diagnosis(
             scenario,
             portfolio_payload,
             prices_bundle,
             fundamentals,
             benchmark_history,
+            _capture_internals=captured,
         )
         if diagnosis_result["status"] != "ok":
             return diagnosis_result
 
-        artifact_paths = _write_artifacts(
-            diagnosis_result,
-            output_dir=output_dir,
-            include_pdf=include_pdf,
-        )
+        diagnosis_result["client_output"] = build_diagnosis_client_output(diagnosis_result)
+
+        artifact_paths = None
+        if emit_artifacts or output_dir is not None or include_pdf:
+            artifact_paths = _write_artifacts(
+                diagnosis_result,
+                output_dir=output_dir,
+                include_pdf=include_pdf,
+            )
         diagnosis_result["artifacts"] = artifact_paths
+
+        # Build _internal for Phase 3 consumption (after artifacts, never written to disk)
+        diagnosis_result["_internal"] = _build_internal(
+            captured, payload,
+        )
         diagnosis_result["pipeline"] = {
             "as_of": format_ymd(anchor),
             "requested_rebalance_frequency": payload["params"]["rebalance_frequency"],
@@ -346,6 +360,53 @@ def _write_artifacts(
     return artifacts
 
 
+def _serialize_series(s: pd.Series) -> dict:
+    """Serialize pd.Series to {index, values} for JSON transport."""
+    return {
+        "index": [str(idx) for idx in s.index],
+        "values": [float(v) for v in s.values],
+    }
+
+
+def _serialize_holding(h: Holding) -> dict:
+    """Serialize Holding dataclass to dict with all fields."""
+    return {
+        "position_name": h.position_name,
+        "ticker": h.ticker,
+        "weight_pct": h.weight_pct,
+        "vehicle_type": h.vehicle_type,
+        "asset_class": h.asset_class,
+        "region": h.region,
+        "sector_theme": h.sector_theme,
+        "style_tag": h.style_tag,
+        "lookthrough_group": h.lookthrough_group,
+        "risk_role": h.risk_role,
+        "notes": h.notes,
+    }
+
+
+def _build_internal(captured: dict, payload: Mapping[str, Any]) -> dict:
+    """Build _internal dict for Phase 3 consumption."""
+    holding_returns = captured.get("holding_returns") or {}
+    benchmark_returns = captured.get("benchmark_returns")
+    holdings = captured.get("holdings") or []
+    cash_pct = captured.get("cash_pct", 0.0)
+
+    params = payload.get("params") or {}
+    pmv = params.get("portfolio_market_value")
+
+    return {
+        "holding_returns": {
+            code: _serialize_series(series)
+            for code, series in holding_returns.items()
+        },
+        "benchmark_returns": _serialize_series(benchmark_returns) if benchmark_returns is not None else None,
+        "holdings": [_serialize_holding(h) for h in holdings],
+        "cash_pct": float(cash_pct),
+        "portfolio_market_value": float(pmv) if pmv is not None else None,
+    }
+
+
 def _infer_vehicle_type(code: str) -> str:
     local_code = code.split(".")[0]
     if len(local_code) == 6 and local_code.startswith(("1", "5")):
@@ -378,6 +439,11 @@ def main() -> None:
     parser.add_argument("--output-dir", default="", help="Artifact output directory")
     parser.add_argument("--as-of", default="", help="Anchor date in YYYY-MM-DD")
     parser.add_argument("--pdf", action="store_true", help="Generate PDF in addition to HTML")
+    parser.add_argument(
+        "--emit-artifacts",
+        action="store_true",
+        help="Generate JSON/HTML artifacts even when output_dir is not provided",
+    )
     args = parser.parse_args()
 
     with open(args.payload_file, "r", encoding="utf-8") as f:
@@ -388,6 +454,7 @@ def main() -> None:
         output_dir=args.output_dir or None,
         as_of=args.as_of or None,
         include_pdf=args.pdf,
+        emit_artifacts=args.emit_artifacts,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

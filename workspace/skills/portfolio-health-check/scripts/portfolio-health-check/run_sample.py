@@ -1,11 +1,11 @@
 """Run diagnosis on sample data and print results."""
 import json
 import sys
-from pathlib import Path
 
+from asset_paths import get_assets_dir
 from diagnosis import run_diagnosis
 
-ASSETS = Path(__file__).parent.parent.parent / "Interview" / "portfolio-health-check" / "assets"
+ASSETS = get_assets_dir(__file__)
 
 
 def main():

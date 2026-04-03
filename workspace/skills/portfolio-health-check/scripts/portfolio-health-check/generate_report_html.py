@@ -7,9 +7,11 @@ TODO: Migrate from f-string concatenation to Jinja2 templates for maintainabilit
 from __future__ import annotations
 import json, sys, math
 from pathlib import Path
+
+from asset_paths import get_assets_dir
 from diagnosis import run_diagnosis
 
-ASSETS = Path(__file__).parent.parent.parent / "Interview" / "portfolio-health-check" / "assets"
+ASSETS = get_assets_dir(__file__)
 
 def pct(v, d=1): return f"{v*100:.{d}f}%" if v is not None else "—"
 def num(v, d=2): return f"{v:.{d}f}" if v is not None else "—"
@@ -36,6 +38,70 @@ def _corr_bg(v):
     if v >= 0: return f"rgba(47,120,173,{a:.2f})"
     return f"rgba(20,63,116,{a:.2f})"
 def _corr_tc(v): return "#fff" if abs(v)>0.55 else "#1A1A1A"
+
+def _health_score(pm, co, cm, lq, fl):
+    """Compute weighted health score 0-100 from all diagnosis dimensions."""
+    # 1. Return quality (25%) — based on Sharpe
+    sr = pm.get("sharpe_ratio") or 0
+    s_ret = min(max((sr + 0.5) / 2.0, 0), 1) * 100  # -0.5→0, 1.5→100
+
+    # 2. Volatility control (15%) — ann_volatility
+    vol = pm.get("ann_volatility") or 0.20
+    s_vol = min(max((0.35 - vol) / 0.30, 0), 1) * 100  # 5%→100, 35%→0
+
+    # 3. Drawdown control (15%) — max_drawdown
+    dd = pm.get("max_drawdown") or 0.15
+    s_dd = min(max((0.40 - dd) / 0.35, 0), 1) * 100  # 5%→100, 40%→0
+
+    # 4. Diversification (15%) — HHI + high-corr pairs
+    hhi = co.get("hhi", 0.5)
+    s_div = min(max((0.5 - hhi) / 0.45, 0), 1) * 100  # 0.05→100, 0.5→0
+    n_hc = len(cm.get("high_correlation_pairs", []))
+    s_div = s_div * max(1 - n_hc * 0.15, 0.2)  # penalise high-corr pairs
+
+    # 5. Liquidity (10%)
+    liq_holdings = lq.get("holdings", [])
+    if liq_holdings and lq.get("portfolio_market_value") is not None:
+        days_list = [h.get("liquidation_days") or 0 for h in liq_holdings]
+        max_days = max(days_list) if days_list else 0
+        s_liq = min(max((10 - max_days) / 9, 0), 1) * 100  # 1d→100, 10d→0
+    else:
+        s_liq = 70  # no data, neutral
+
+    # 6. Risk flags (20%)
+    n_high = sum(1 for f in fl if f.get("severity") == "high")
+    n_mid = sum(1 for f in fl if f.get("severity") == "medium")
+    s_flag = max(100 - n_high * 30 - n_mid * 12, 0)
+
+    score = (s_ret * 0.25 + s_vol * 0.15 + s_dd * 0.15
+             + s_div * 0.15 + s_liq * 0.10 + s_flag * 0.20)
+    details = [
+        ("收益质量", round(s_ret), 25),
+        ("波动控制", round(s_vol), 15),
+        ("回撤控制", round(s_dd), 15),
+        ("分散化", round(s_div), 15),
+        ("流动性", round(s_liq), 10),
+        ("风险合规", round(s_flag), 20),
+    ]
+    return round(score), details
+
+def _score_ring_svg(score, sz=120):
+    """SVG donut ring for health score."""
+    cx, cy, r = sz//2, sz//2, sz//2 - 10
+    circ = 2 * math.pi * r
+    pct_val = score / 100
+    offset = circ * (1 - pct_val)
+    if score >= 80: color = "#12B76A"
+    elif score >= 60: color = "#F79009"
+    else: color = "#F04438"
+    return f'''<svg viewBox="0 0 {sz} {sz}" xmlns="http://www.w3.org/2000/svg" style="width:{sz}px;height:{sz}px">
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#E2E8F0" stroke-width="8"/>
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="8"
+  stroke-dasharray="{circ:.1f}" stroke-dashoffset="{offset:.1f}"
+  stroke-linecap="round" transform="rotate(-90 {cx} {cy})"/>
+<text x="{cx}" y="{cy-4}" text-anchor="middle" font-size="28" font-weight="700" fill="{color}" font-family="Microsoft YaHei,sans-serif">{score}</text>
+<text x="{cx}" y="{cy+14}" text-anchor="middle" font-size="10" fill="#64748B" font-family="Microsoft YaHei,sans-serif">/ 100</text>
+</svg>'''
 
 def _radar_svg(vals, labels, sz=260):
     cx,cy,r = sz//2, sz//2, sz//2-36
@@ -147,6 +213,17 @@ def generate_html(result, output_path):
     if not hphtml:
         hphtml='<div style="font-size:9px;color:#12B76A;margin-top:4px">✓ 无超阈值高相关配对</div>'
 
+    health_score, health_details = _health_score(pm, co, cm, lq, fl)
+    score_ring = _score_ring_svg(health_score)
+    if health_score >= 80: hs_label, hs_color = "优秀", "#12B76A"
+    elif health_score >= 60: hs_label, hs_color = "良好", "#2F78AD"
+    elif health_score >= 40: hs_label, hs_color = "需关注", "#F79009"
+    else: hs_label, hs_color = "建议调整", "#F04438"
+    hs_bars = ""
+    for lbl, val, wt in health_details:
+        bc = "#12B76A" if val >= 70 else "#F79009" if val >= 40 else "#F04438"
+        hs_bars += f'<div class="hs-bar"><div class="hs-bl">{lbl}</div><div class="hs-bw"><div class="hs-bf" style="width:{val}%;background:{bc}"></div></div><div class="hs-bv">{val}</div></div>\n'
+
     pc=lambda m,v: kc(m,v)
 
     html=f'''<!DOCTYPE html>
@@ -225,6 +302,17 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 .kn{{font-size:8.5px;color:#64748B;margin-top:3px;line-height:1.45}}
 .fn{{font-size:8.5px;color:#64748B;font-weight:400;padding-left:6px;line-height:1.4}}
 .g{{color:#12B76A;font-weight:600}}.r{{color:#F04438;font-weight:600}}
+/* Health score */
+.hs-wrap{{display:flex;align-items:center;gap:18px;margin-bottom:14px;padding:14px 18px;background:linear-gradient(135deg,#F8FAFC,#EEF2FF);border:1px solid #E2E8F0;border-radius:8px}}
+.hs-ring{{flex-shrink:0}}
+.hs-info{{flex:1}}
+.hs-title{{font-size:14px;font-weight:700;color:#0F172A;margin-bottom:2px}}
+.hs-sub{{font-size:10px;color:#64748B;margin-bottom:8px}}
+.hs-bars{{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}}
+.hs-bar{{display:flex;align-items:center;gap:6px}}
+.hs-bl{{font-size:8.5px;color:#64748B;width:48px;text-align:right}}
+.hs-bw{{flex:1;height:8px;background:#E2E8F0;border-radius:4px;overflow:hidden}}
+.hs-bf{{height:100%;border-radius:4px}}.hs-bv{{font-size:8px;font-weight:600;color:#334155;width:22px}}
 .sp{{height:10px}}.dc{{position:absolute;bottom:16px;left:28px;right:28px;font-size:7px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:6px}}
 </style></head><body>
 
@@ -248,6 +336,16 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 <!-- PAGE 2: KPI + TABLE -->
 <div class="pg"><div class="ct">
 <div class="gl"></div>
+<div class="hs-wrap">
+<div class="hs-ring">{score_ring}</div>
+<div class="hs-info">
+<div class="hs-title">组合健康度 <span style="color:{hs_color};margin-left:6px">{health_score} 分 · {hs_label}</span></div>
+<div class="hs-sub">综合收益质量、波动控制、回撤深度、分散化程度、流动性和风险合规六个维度加权评估</div>
+<div class="hs-bars">
+{hs_bars}</div>
+</div>
+</div>
+<div style="height:40px"></div>
 <div class="st">01 <span>风险指标总览 Risk Metrics Overview</span></div>
 <div class="nt">这一页是您投资组合的「体检报告单」。我们从三个角度检查了您的组合：<b>赚了多少</b>（收益）、<b>波动有多大</b>（风险）、<b>最坏情况会怎样</b>（尾部风险）。数字旁的颜色可以帮您快速判断：<span class="g">绿色 = 健康</span>，<span style="color:#F79009">橙色 = 需留意</span>，<span class="r">红色 = 建议关注</span>。</div>
 <div class="kg">
@@ -349,7 +447,8 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 
 if __name__=="__main__":
     scenario=sys.argv[1] if len(sys.argv)>1 else "scenario_moderate.json"
-    output=sys.argv[2] if len(sys.argv)>2 else "diagnosis_report.html"
+    out_dir=Path(__file__).resolve().parent/"output"; out_dir.mkdir(exist_ok=True)
+    output=sys.argv[2] if len(sys.argv)>2 else str(out_dir/"diagnosis_report.html")
     result=run_diagnosis(
         ASSETS/"scenarios"/scenario,
         ASSETS/"sample-portfolios"/"sample_portfolio_a_shares_growth.csv",
@@ -360,4 +459,4 @@ if __name__=="__main__":
     if result["status"]!="ok": print(f'Error: {result["error_message"]}'); sys.exit(1)
     p=generate_html(result,output)
     print(f"Report: {p.resolve()}")
-    print("Chrome → Ctrl+P → Save as PDF (margins:none, background graphics:on)")
+    print("Chrome -> Ctrl+P -> Save as PDF (margins:none, background graphics:on)")

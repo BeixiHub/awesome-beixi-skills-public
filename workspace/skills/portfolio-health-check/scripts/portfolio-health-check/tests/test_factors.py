@@ -2,8 +2,8 @@
 import pytest
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
+from asset_paths import get_assets_dir
 from compute.factor_engine import (
     _norm, compute_size, compute_value, compute_momentum,
     compute_quality, compute_volatility_factor, compute_liquidity_factor,
@@ -14,7 +14,7 @@ from compute.liquidity import compute_liquidity
 
 from data_loader import load_prices, load_fundamentals
 
-ASSETS = Path(__file__).resolve().parent.parent.parent.parent / "Interview" / "portfolio-health-check" / "assets"
+ASSETS = get_assets_dir(__file__)
 
 
 # ── Norm ────────────────────────────────────────────────────────────

@@ -14,7 +14,8 @@ from typing import Any, Mapping
 import pandas as pd
 
 from data_loader import (
-    load_scenario, load_portfolio, load_prices, load_fundamentals, load_benchmark,
+    load_scenario, load_portfolio, load_and_normalize_portfolio,
+    load_prices, load_fundamentals, load_benchmark,
     truncate_by_lookback, FREQ_CONFIG, LOOKBACK_BARS, LOOKBACK_DAILY_BARS,
 )
 from compute.thresholds import validate_params, get_thresholds
@@ -49,6 +50,8 @@ def run_diagnosis(
     prices_input: str | Path | pd.DataFrame | list[dict[str, Any]] | Mapping[str, Any],
     fundamentals_input: str | Path | pd.DataFrame | list[dict[str, Any]] | Mapping[str, Any],
     benchmark_input: str | Path | pd.DataFrame | list[dict[str, Any]] | Mapping[str, Any],
+    *,
+    _capture_internals: dict | None = None,
 ) -> dict:
     """Run the full 15-step diagnosis pipeline.
 
@@ -66,14 +69,8 @@ def run_diagnosis(
     scenario = load_scenario(scenario_input)
 
     # ── Step 2: Load portfolio ──────────────────────────────────────
-    holdings, cash_pct = load_portfolio(portfolio_input)
-    total = sum(h.weight_pct for h in holdings) + cash_pct
-    if abs(total - 100) > 0.1:
-        scale = 100 / total
-        for h in holdings:
-            h.weight_pct *= scale
-        cash_pct *= scale
-        warnings.append(f"权重之和={total:.1f}%，已自动归一化到100%")
+    holdings, cash_pct, norm_warnings = load_and_normalize_portfolio(portfolio_input)
+    warnings.extend(norm_warnings)
 
     weights = {h.ticker: h.weight_pct / 100 for h in holdings}
     cash_frac = cash_pct / 100
@@ -260,6 +257,13 @@ def run_diagnosis(
         if daily_len < main_len:
             daily_helper_window = f"daily辅助仅{daily_len}bars，短于主频{main_len}bars"
             warnings.append(daily_helper_window)
+
+    # ── Capture internals for Phase 3 (optional) ────────────────────
+    if _capture_internals is not None:
+        _capture_internals["holding_returns"] = holding_returns
+        _capture_internals["benchmark_returns"] = bench_returns if len(bench_df) > 0 else None
+        _capture_internals["holdings"] = holdings
+        _capture_internals["cash_pct"] = cash_pct
 
     # ── Assemble output ─────────────────────────────────────────────
     now = datetime.now(timezone(timedelta(hours=8)))

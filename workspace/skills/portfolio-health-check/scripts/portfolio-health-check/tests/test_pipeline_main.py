@@ -148,6 +148,36 @@ def test_run_pipeline_generates_artifacts_with_partial_fundamentals(tmp_path: Pa
     artifacts = result["artifacts"]
     assert Path(artifacts["diagnosis_json"]).exists()
     assert Path(artifacts["html_report"]).exists()
+    assert result["client_output"]["title"] == "组合诊断摘要"
+
+
+def test_run_pipeline_defaults_to_structured_text_without_artifacts():
+    payload = {
+        "holdings": [
+            {"code": "600519.SH", "weight_pct": 55.0},
+            {"code": "300750.SZ", "weight_pct": 35.0},
+        ],
+        "cash_pct": 10.0,
+        "params": {
+            "rebalance_frequency": "monthly",
+            "position_style": "constant_mix",
+            "risk_tolerance": "moderate",
+            "investment_horizon": "1-3y",
+            "portfolio_market_value": 5_000_000,
+        },
+    }
+
+    result = run_pipeline(
+        payload,
+        client=FakeQVerisClient(),
+        as_of="2026-04-01",
+        include_pdf=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["artifacts"] is None
+    assert result["client_output"]["title"] == "组合诊断摘要"
+    assert "总体判断" in result["client_output"]["markdown"]
 
 
 def test_run_pipeline_pdf_uses_html_renderer(monkeypatch, tmp_path: Path):

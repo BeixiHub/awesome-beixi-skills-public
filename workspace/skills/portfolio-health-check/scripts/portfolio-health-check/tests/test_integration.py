@@ -1,11 +1,12 @@
 """Integration tests: end-to-end with sample data."""
 import pytest
 import pandas as pd
-from pathlib import Path
 
+from asset_paths import get_assets_dir
 from diagnosis import run_diagnosis
+from diagnosis_schema import validate_diagnosis_result, REQUIRED_DATA_SECTIONS
 
-ASSETS = Path(__file__).resolve().parent.parent.parent.parent / "Interview" / "portfolio-health-check" / "assets"
+ASSETS = get_assets_dir(__file__)
 
 
 def _run(scenario="scenario_moderate.json"):
@@ -83,12 +84,11 @@ class TestModerateDaily:
 
     def test_all_sections_present(self, result):
         d = result["data"]
-        for key in [
-            "correlation_matrix", "risk_metrics", "risk_contribution",
-            "concentration", "benchmark", "factor_exposure",
-            "sector_exposure", "liquidity", "risk_flags", "metadata",
-        ]:
+        for key in sorted(REQUIRED_DATA_SECTIONS):
             assert key in d, f"Missing section: {key}"
+
+    def test_strict_schema_validation(self, result):
+        validate_diagnosis_result(result)
 
     def test_correlation_matrix_shape(self, result):
         cm = result["data"]["correlation_matrix"]
