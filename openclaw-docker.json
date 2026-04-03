@@ -1,20 +1,14 @@
 {
   "models": {
     "providers": {
-      "moonshot": {
-        "baseUrl": "https://api.moonshot.cn/v1",
-        "apiKey": "${MOONSHOT_API_KEY}",
-        "api": "openai-completions",
-        "models": [
-          { "id": "kimi-k2.5", "name": "Kimi K2.5", "maxTokens": 16384 },
-          { "id": "moonshot-v1-128k", "name": "Kimi 128K" }
-        ]
-      },
       "ark": {
         "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3",
         "apiKey": "${ARK_API_KEY}",
         "api": "openai-completions",
-        "models": [{ "id": "ark-code-latest", "name": "Ark Code Latest" }]
+        "models": [
+          { "id": "kimi-k2.5", "name": "Kimi K2.5", "maxTokens": 16384 },
+          { "id": "ark-code-latest", "name": "Ark Code Latest" }
+        ]
       }
     }
   },
@@ -23,8 +17,8 @@
     "defaults": {
       "workspace": "/root/.openclaw/workspace",
       "model": {
-        "primary": "ark/ark-code-latest",
-        "fallbacks": ["moonshot/kimi-k2.5"]
+        "primary": "ark/kimi-k2.5",
+        "fallbacks": ["ark/ark-code-latest"]
       },
       "compaction": { "mode": "safeguard" },
       "maxConcurrent": 4,
