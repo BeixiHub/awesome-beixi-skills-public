@@ -70,21 +70,33 @@ def composite_score(rec: dict, objectives: list[str]) -> float:
 # ---------------------------------------------------------------------------
 
 def _dedup_key(rec: dict) -> tuple:
-    """(action_type, fund_destination, affected_codes)."""
+    """(action_type, fund_destination, primary_reduce_codes).
+
+    For rebalance/replace, key on the codes being *reduced* only,
+    so that two recommendations reducing the same holding merge
+    even if they differ in where freed capital goes.
+    """
     category = rec.get("category", "")
     targets = rec.get("targets", [])
     instruments = rec.get("instruments", [])
 
-    affected = frozenset(
-        [t["code"] for t in targets] + [i["code"] for i in instruments]
-    )
-
     if instruments:
         dest = f"buy_external:{instruments[0]['code']}"
+        affected = frozenset(
+            [t["code"] for t in targets] + [i["code"] for i in instruments]
+        )
     elif category in ("rebalance", "replace"):
         dest = "redistribute_internal"
+        # Key only on the codes being reduced — the destination is secondary
+        reduce_codes = frozenset(
+            t["code"] for t in targets if t.get("direction") == "reduce"
+        )
+        affected = reduce_codes if reduce_codes else frozenset(
+            t["code"] for t in targets
+        )
     else:
         dest = "other"
+        affected = frozenset(t["code"] for t in targets)
 
     return (category, dest, affected)
 
@@ -110,13 +122,37 @@ def deduplicate(recs: list[dict]) -> list[dict]:
             # Merge rationale
             rationales = [r["rationale"] for r in group if r.get("rationale")]
             base["rationale"] = "；".join(dict.fromkeys(rationales))
-            # Take most aggressive reduction
+            # Take most aggressive reduction per code across all group members
             if base.get("targets"):
-                for i, t in enumerate(base["targets"]):
-                    if t.get("direction") == "reduce":
-                        min_to = min(r["targets"][i]["to_pct"] for r in group
-                                     if len(r.get("targets", [])) > i)
-                        t["to_pct"] = min_to
+                # Collect all targets across group, keyed by (code, direction)
+                best_reduce: dict[str, float] = {}
+                all_targets_by_code: dict[str, dict] = {}
+                for r in group:
+                    for t in r.get("targets", []):
+                        code = t["code"]
+                        all_targets_by_code.setdefault(code, t)
+                        if t.get("direction") == "reduce":
+                            prev = best_reduce.get(code, float("inf"))
+                            best_reduce[code] = min(prev, t["to_pct"])
+
+                # Rebuild targets: keep base reduce targets with most aggressive to_pct,
+                # then add any increase targets not already present
+                merged_targets = []
+                seen_codes = set()
+                for t in base["targets"]:
+                    code = t["code"]
+                    seen_codes.add(code)
+                    if t.get("direction") == "reduce" and code in best_reduce:
+                        t = dict(t)
+                        t["to_pct"] = best_reduce[code]
+                    merged_targets.append(t)
+                # Add increase targets from other group members
+                for r in group[1:]:
+                    for t in r.get("targets", []):
+                        if t["code"] not in seen_codes and t.get("direction") == "increase":
+                            merged_targets.append(t)
+                            seen_codes.add(t["code"])
+                base["targets"] = merged_targets
             merged.append(base)
 
     return merged

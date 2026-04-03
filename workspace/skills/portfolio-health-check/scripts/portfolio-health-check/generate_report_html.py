@@ -203,8 +203,22 @@ def generate_html(result, output_path):
             val_line=f"预计清仓 {days:.1f} 天　·　日均成交额 {turnover:.1f} 亿"
         liq_cards+=f'<div class="fc {cls}"><div class="fhd"><span class="fs">{level}</span>{name}<span class="cd" style="display:inline;margin-left:6px">{h["code"]}</span></div><div class="fb">{desc}</div><div class="fv">{val_line}</div></div>\n'
 
-    # Warnings
-    whtml="".join(f'<div class="wi">• {w}</div>' for w in m.get("warnings",[]))
+    # Warnings — split into data-gap notices vs general warnings
+    data_gap_warnings = [w for w in m.get("warnings", []) if "无价格数据" in w or "权重" in w and "分配" in w]
+    other_warnings = [w for w in m.get("warnings", []) if w not in data_gap_warnings]
+    whtml = "".join(f'<div class="wi">• {w}</div>' for w in other_warnings)
+
+    # Data coverage notice block
+    dcov_html = ""
+    if data_gap_warnings:
+        dcov_items = "".join(
+            f'<div class="fc fm"><div class="fb" style="font-size:10px">{w}</div></div>\n'
+            for w in data_gap_warnings
+        )
+        dcov_html = f'''<div class="sp"></div>
+<div class="st">10 <span>数据覆盖说明 Data Coverage</span></div>
+<div class="nt">以下标的在数据源中未能获取到历史行情数据，其权重已按比例重新分配至其余持仓。<b>这些标的未纳入本次诊断的收益、风险和相关性计算。</b>如需完整评估，请确认标的代码是否正确或联系数据服务商核实数据可用性。</div>
+{dcov_items}'''
 
     # Correlation high pairs
     hphtml=""
@@ -212,6 +226,8 @@ def generate_html(result, output_path):
         hphtml+=f'<div style="font-size:9px;color:#F04438">⚠ {p["pair"][0]} — {p["pair"][1]}: {p["correlation"]:.2f}</div>'
     if not hphtml:
         hphtml='<div style="font-size:9px;color:#12B76A;margin-top:4px">✓ 无超阈值高相关配对</div>'
+
+    _dc = '<div class="dc">本报告由蓓曦智能 x qVeris 量化引擎自动生成，基于历史数据分析，不构成投资建议。过往表现不代表未来收益。投资有风险，决策需谨慎。</div>'
 
     health_score, health_details = _health_score(pm, co, cm, lq, fl)
     score_ring = _score_ring_svg(health_score)
@@ -295,7 +311,7 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 .fb{{font-size:10px;color:#334155;line-height:1.5}}.fv{{font-size:8.5px;color:#94A3B8;margin-top:2px}}
 .wi{{font-size:9.5px;color:#64748B;margin-bottom:3px;padding-left:8px;line-height:1.5}}
 /* Mini table */
-.mt td{{font-size:10px;padding:4px 8px}}.mt td:first-child{{color:#64748B;width:40%}}.mt td:last-child{{font-weight:600}}
+.mt{{table-layout:fixed;width:100%}}.mt td{{font-size:10px;padding:4px 8px}}.mt td:first-child{{color:#64748B;width:22%}}.mt td:nth-child(2){{width:18%}}.mt td:last-child{{font-weight:600}}
 /* Annotations — readable at A4 print */
 .nt{{font-size:10.5px;color:#475569;margin-bottom:10px;line-height:1.65;padding:8px 12px;background:linear-gradient(135deg,#F8FAFC,#F1F5F9);border-left:3px solid #6EB0C2;border-radius:0 6px 6px 0}}
 .nt b{{color:#0F172A}}
@@ -361,6 +377,7 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 <tbody>{hrows}
 <tr><td class="tl"><b>组合 Portfolio</b></td><td>100%</td><td class="{"pos" if pm["ann_return_arithmetic"]>0 else "neg"}">{spct(pm["ann_return_arithmetic"])}</td><td>{pct(pm["ann_volatility"])}</td><td class="neg">{pct(pm["max_drawdown"])}<br><span class="cd">{str(pm["max_dd_recovery_days"])+"天恢复" if pm["max_dd_recovery_days"] else "尚未恢复"}</span></td><td class="{"pos" if (pm["sharpe_ratio"] or 0)>0 else "neg"}">{num(pm["sharpe_ratio"])}</td><td>{num(pm["sortino_ratio"])}</td><td>{pct(pm["var_95"])}</td></tr>
 </tbody></table>
+{_dc}
 </div><div class="pn">02</div></div>
 
 <!-- PAGE 3: CORR + FACTOR -->
@@ -394,6 +411,7 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 <div class="st">04 <span>风险贡献 Risk Contribution</span></div>
 <div class="nt">您的每一只持仓对组合整体波动的「贡献」并不相同。比如某只股票虽然只占 25% 的仓位，但它波动很大，可能贡献了 50% 以上的风险。下方左侧深蓝色柱是每只标的的风险贡献，右侧灰色是它的权重。<b>如果深蓝柱远长于灰色柱</b>，说明这只标的「拖累」组合风险的程度远超其仓位占比，是组合波动的主要来源。</div>
 {rcbars}
+{_dc}
 </div><div class="pn">03</div></div>
 
 <!-- PAGE 4: SECTOR + CONC + BENCH + LIQ -->
@@ -433,12 +451,19 @@ tr:last-child{{font-weight:600;background:#EEF2FF}}
 <div class="st">08 <span>流动性 Liquidity</span></div>
 <div class="nt">流动性回答一个实际问题：<b>如果您急需用钱，这些股票能多快卖掉？</b>我们根据您的总投资金额和每只股票每天的真实成交量，计算出以不影响市场价格的节奏（按日均成交额的 10%）卖出，分别需要几天。<b>天数越少越好</b>——超过 5 天意味着该持仓在紧急情况下难以快速变现。</div>
 {liq_cards}
-<div class="sp"></div>
+{_dc}
+</div><div class="pn">04</div></div>
+
+<!-- PAGE 5: FLAGS + DATA COVERAGE -->
+<div class="pg"><div class="ct">
+<div class="gl"></div>
 <div class="st">09 <span>风险标记 Risk Flags</span></div>
 <div class="nt">我们根据您的风险偏好（<b>{cn_tol(m["risk_tolerance"])}型</b>）和投资期限（<b>{m["investment_horizon"]}</b>），为您设定了对应的安全阈值。当某项指标超出阈值时，会触发下方的标记提醒。<span class="r">「高」级别</span>意味着该项已明显超出安全范围，建议优先调整；<span style="color:#F79009">「中」级别</span>尚在可接受边缘，建议留意观察。没有标记不代表完美，只是说明各项指标都在您的风险承受范围内。</div>
 {fhtml if fhtml else '<div style="color:#12B76A;font-size:10px;margin:6px 0">✓ 所有指标均在阈值范围内，未触发风险标记</div>'}
-<div class="dc">本报告由蓓曦智能 x qVeris 量化引擎自动生成，基于历史数据分析，不构成投资建议。过往表现不代表未来收益。投资有风险，决策需谨慎。</div>
-</div><div class="pn">04</div></div>
+{dcov_html}
+{f'<div class="sp"></div><div class="st">{"11" if dcov_html else "10"} <span>其他提示 Notes</span></div>' + whtml if whtml else ''}
+{_dc}
+</div><div class="pn">05</div></div>
 
 </body></html>'''
 
