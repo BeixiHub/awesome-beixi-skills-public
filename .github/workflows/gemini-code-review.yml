@@ -18,7 +18,12 @@ jobs:
       - name: Get PR diff
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }}
-          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- '*.py' '*.json' '*.md' '*.yml' '*.yaml' | head -c 50000 > /tmp/pr_diff.txt
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- '*.py' '*.json' '*.md' '*.yml' '*.yaml' > /tmp/pr_diff_full.txt
+          head -c 500000 /tmp/pr_diff_full.txt > /tmp/pr_diff.txt
+          FULL_SIZE=$(wc -c < /tmp/pr_diff_full.txt)
+          TRUNC_SIZE=$(wc -c < /tmp/pr_diff.txt)
+          echo "FULL_DIFF_SIZE=$FULL_SIZE" >> $GITHUB_ENV
+          echo "TRUNCATED=$([ "$FULL_SIZE" -gt "$TRUNC_SIZE" ] && echo true || echo false)" >> $GITHUB_ENV
           echo "DIFF_SIZE=$(wc -c < /tmp/pr_diff.txt)" >> $GITHUB_ENV
 
       - name: Gemini Code Review
@@ -62,11 +67,11 @@ jobs:
               '',
               'Diff:',
               '```diff',
-              diff.substring(0, 30000),
+              diff,
               '```',
             ].join('\n');
 
-            const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiKey;
+            const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + apiKey;
             const response = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -90,9 +95,13 @@ jobs:
               return;
             }
 
+            const truncNote = process.env.TRUNCATED === 'true'
+              ? '\n\n> ⚠️ Diff was truncated to 500KB (full size: ' + process.env.FULL_DIFF_SIZE + ' bytes). Some changes may not have been reviewed.\n'
+              : '';
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: '## 🤖 Gemini Code Review\n\n' + review + '\n\n---\n*Powered by Gemini 2.0 Flash*',
+              body: '## 🤖 Gemini Code Review\n\n' + review + truncNote + '\n\n---\n*Powered by Gemini 2.5 Flash*',
             });
