@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 BASE_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
 HEADERS = {
-    "X-API-Key": os.getenv("EVENT_PUSH_API_KEY", "sk-test-local-20260315"),
+    "X-API-Key": os.getenv("EVENT_PUSH_API_KEY", ""),
     "tenant-id": "1",
 }
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
