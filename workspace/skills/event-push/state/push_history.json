@@ -2,18 +2,18 @@
   "max_batches": 3,
   "batches": [
     {
-      "push_time": "2026-04-10T12:19:05+08:00",
-      "keyword": "AI",
+      "push_time": "",
+      "keyword": "",
       "events": []
     },
     {
-      "push_time": "2026-04-10T12:15:11+08:00",
-      "keyword": "AI",
+      "push_time": "",
+      "keyword": "",
       "events": []
     },
     {
-      "push_time": "2026-04-10T12:09:08+08:00",
-      "keyword": "AI",
+      "push_time": "",
+      "keyword": "",
       "events": []
     }
   ]
