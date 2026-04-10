@@ -247,7 +247,7 @@ This is a starting point. Add your own conventions, style, and rules as you figu
 
 **CRITICAL: Before answering ANY user message, you MUST scan these routing rules first.** If a message matches any trigger below, you MUST load and follow the corresponding SKILL.md. Do NOT answer in your own words or ask clarifying questions — the skill file contains all the workflow instructions you need.
 
-Also consult `routing-rules.json` (especially its `pipelines.event-push` and other pipeline entries) and `PLAYBOOKS.md` for model selection and workflow guidance.
+Also consult `routing-rules.json` (especially its `pipelines.event-intelligence` and other pipeline entries) and `PLAYBOOKS.md` for model selection and workflow guidance.
 
 1) Portfolio / holdings diagnosis → portfolio-health-check
 - Triggers: holdings, weights, cash_pct, cost basis, risk preference, investment horizon, screenshots, uploaded diagnosis reports, and asks for 持股体检 / 组合诊断 / 风险复盘 / 调仓优化 / 集中度 / 相关性 / 回撤 / 风险贡献 / 持仓分析 / 股权分析
@@ -279,13 +279,13 @@ Also consult `routing-rules.json` (especially its `pipelines.event-push` and oth
 7) Scheduling/reminders → cron
 - Use cron for exact timing; heartbeat for loose periodic checks.
 
-8) Event push / 事件推送 → event-push
+8) Event intelligence / 事件情报 → event-intelligence
 - Triggers: 开始推送、启动推送、事件推送、定时推送、停止推送、关闭推送、推送间隔、第X条详细看看、那个关于XX的事件、查最近X小时/分钟事件、最近有什么事件、查事件、搜事件、看看事件、有什么新事件
-- Action: load and follow `skills/event-push/SKILL.md`
+- Action: load and follow `skills/event-intelligence/SKILL.md`
 - Part 1 (定时推送): 按用户设定间隔（默认 5 分钟）周期调用事件语义检索 API 并推送摘要
 - Part 2 (事件详情): 用户指定 eventId 后调用详情 API 返回完整分析
 - Part 3 (手动查询): 用户指定时间范围（如"查最近5小时"）时，调用 search_events(minutes=用户指定) 并按推送格式输出，同时写入 push_history
-- Config: `skills/event-push/state/push_config.json` 持久化间隔、关键词等参数
+- Config: `skills/event-intelligence/state/push_config.json` 持久化间隔、关键词等参数
 - 间隔修改同时记录到 `memory/YYYY-MM-DD.md`
 
 10) Safety & cost
