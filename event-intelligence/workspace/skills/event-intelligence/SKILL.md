@@ -30,7 +30,7 @@ event-intelligence/
 
 - Python 3.10+，已安装 `requests` 库
 - 网络可达 `https://admin.deepseekdata.com`
-- API Key 优先读取环境变量 `EVENT_INTEL_API_KEY`，未设置时使用内置默认值
+- API Key 通过环境变量 `EVENT_INTEL_API_KEY` 读取，必须提前配置
 
 ## 环境适配
 
