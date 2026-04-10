@@ -1,11 +1,11 @@
 ---
-name: event-push
+name: event-intelligence
 description: 定时推送、手动获取事件资讯，并支持查询单条事件详情。
 description_zh: 事件语义检索定时推送 + 单条详情查询
 description_en: Scheduled event push notifications with detail drill-down
 ---
 
-# Event Push — 事件定时推送技能
+# Event Intelligence — 事件情报技能
 
 ## 概述
 
@@ -18,7 +18,7 @@ description_en: Scheduled event push notifications with detail drill-down
 ## 文件结构
 
 ```
-event-push/
+event-intelligence/
 ├── SKILL.md              # 本文件，技能说明
 ├── event_query.py         # API 调用脚本（search_events / get_event_detail / daily_event_summary）
 └── state/
@@ -30,13 +30,13 @@ event-push/
 
 - Python 3.10+，已安装 `requests` 库
 - 网络可达 `https://admin.deepseekdata.com`
-- API Key 优先读取环境变量 `EVENT_PUSH_API_KEY`，未设置时使用内置默认值
+- API Key 通过环境变量 `EVENT_INTEL_API_KEY` 读取，必须提前配置
 
 ## 环境适配
 
 ### 路径约定
 
-本技能中所有文件路径均 **相对于本 SKILL.md 所在目录**（即 `event-push/`）。
+本技能中所有文件路径均 **相对于本 SKILL.md 所在目录**（即 `event-intelligence/`）。
 执行命令前，agent 应先定位本技能目录：
 
 ```bash

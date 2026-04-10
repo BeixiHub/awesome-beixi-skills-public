@@ -1,8 +1,0 @@
-{
-  "fingerprint": "{\"as_of\":\"\",\"codes\":\"600519.SH,510300.SH,515080.SH,000198.OF\",\"collect_all\":false,\"datasets\":[{\"dataset_id\":\"daily_2y\",\"parameters\":{\"codes\":\"600519.SH,510300.SH,515080.SH,000198.OF\",\"enddate\":\"2026-03-31\",\"indicators\":\"close,volume\",\"interval\":\"D\",\"startdate\":\"2025-01-01\"},\"tool_id\":\"ths_ifind.history_quotation.v1\"}],\"format\":\"lean-v3\",\"rebalance_frequency\":\"monthly\"}",
-  "updated_at": "2026-03-31T09:32:50.527097+00:00",
-  "codes": "600519.SH,510300.SH,515080.SH,000198.OF",
-  "rebalance_frequency": "monthly",
-  "as_of": "",
-  "collect_all": false
-}

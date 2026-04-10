@@ -179,7 +179,7 @@
         }
       ]
     },
-    "event-push": {
+    "event-intelligence": {
       "detect": [
         "事件推送",
         "定时推送",
@@ -199,10 +199,10 @@
       "steps": [
         {
           "stage": "加载技能",
-          "action": "read skills/event-push/SKILL.md and follow it"
+          "action": "read skills/event-intelligence/SKILL.md and follow it"
         }
       ],
-      "notes": "优先级高于 research/finance pipeline。只要命中 detect 关键词，必须走 event-push SKILL.md，不走通用问答。"
+      "notes": "优先级高于 research/finance pipeline。只要命中 detect 关键词，必须走 event-intelligence SKILL.md，不走通用问答。"
     },
     "writing": {
       "detect": [
