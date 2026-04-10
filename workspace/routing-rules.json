@@ -1,0 +1,294 @@
+{
+  "version": 4,
+  "mode": "capability-first",
+  "defaultModel": "deepseekdata/deepseek-chat",
+  "tiers": {
+    "low": "deepseekdata/deepseek-chat",
+    "medium": "deepseekdata/deepseek-v3",
+    "high": "openrouter/openai/gpt-5.4",
+    "code": "openrouter/anthropic/claude-sonnet-4.6",
+    "polish": "deepseekdata/gpt-5.1"
+  },
+  "principles": [
+    "先执行后表达",
+    "先检索或读上下文，再下结论",
+    "复杂任务走流水线，不走单轮硬答",
+    "输出面向最终使用者，不暴露工具痕迹"
+  ],
+  "escalation": {
+    "toMedium": [
+      "多步任务",
+      "结构化输出",
+      "长文总结",
+      "需要比对或归纳",
+      "函数级代码",
+      "需要明确计划"
+    ],
+    "toHigh": [
+      "复杂推理",
+      "最新信息综合",
+      "跨文件代码修改",
+      "高风险结论",
+      "正式对外文稿",
+      "金融深度分析",
+      "安全/架构/性能审计"
+    ],
+    "toCode": [
+      "调试",
+      "重构",
+      "代码审查",
+      "跨模块实现",
+      "测试修复"
+    ]
+  },
+  "pipelines": {
+    "recall": {
+      "detect": [
+        "之前",
+        "还记得",
+        "偏好",
+        "项目进展",
+        "上次",
+        "最近决定",
+        "待办"
+      ],
+      "steps": [
+        {
+          "stage": "记忆检索",
+          "tool": "memory_search"
+        },
+        {
+          "stage": "必要片段读取",
+          "tool": "memory_get"
+        },
+        {
+          "stage": "回答",
+          "model": "deepseekdata/deepseek-v3"
+        }
+      ]
+    },
+    "research": {
+      "detect": [
+        "搜索",
+        "查资料",
+        "调研",
+        "对比",
+        "最新",
+        "今天",
+        "现在",
+        "发生了什么",
+        "资料汇总"
+      ],
+      "steps": [
+        {
+          "stage": "问题拆解",
+          "model": "deepseekdata/deepseek-chat"
+        },
+        {
+          "stage": "网页检索",
+          "tool": "web_search"
+        },
+        {
+          "stage": "高价值来源读取",
+          "tool": "web_fetch"
+        },
+        {
+          "stage": "综合与交叉验证",
+          "model": "deepseekdata/deepseek-v3"
+        },
+        {
+          "stage": "结论校对",
+          "model": "openrouter/openai/gpt-5.4"
+        }
+      ]
+    },
+    "code": {
+      "detect": [
+        "代码",
+        "函数",
+        "模块",
+        "bug",
+        "报错",
+        "重构",
+        "审查",
+        "测试",
+        "仓库",
+        "脚本"
+      ],
+      "steps": [
+        {
+          "stage": "代码扫描",
+          "model": "deepseekdata/deepseek-chat"
+        },
+        {
+          "stage": "方案与变更点",
+          "model": "deepseekdata/deepseek-v3"
+        },
+        {
+          "stage": "实现",
+          "model": "openrouter/anthropic/claude-sonnet-4.6"
+        },
+        {
+          "stage": "回归检查",
+          "model": "openrouter/openai/gpt-5.4"
+        }
+      ]
+    },
+    "finance": {
+      "detect": [
+        "公司",
+        "股票",
+        "基金",
+        "指数",
+        "营收",
+        "净利",
+        "ROE",
+        "现金流",
+        "估值",
+        "回撤",
+        "ETF",
+        "行业",
+        "板块",
+        "CPI",
+        "M2",
+        "GDP",
+        "LPR",
+        "财报",
+        "指引"
+      ],
+      "steps": [
+        {
+          "stage": "问题归类",
+          "model": "deepseekdata/deepseek-chat"
+        },
+        {
+          "stage": "网页信息",
+          "tool": "web_search"
+        },
+        {
+          "stage": "结构化数据",
+          "tool": "qveris"
+        },
+        {
+          "stage": "交叉验证",
+          "model": "deepseekdata/deepseek-v3"
+        },
+        {
+          "stage": "专业成稿",
+          "model": "openrouter/openai/gpt-5.4"
+        }
+      ]
+    },
+    "event-push": {
+      "detect": [
+        "事件推送",
+        "定时推送",
+        "开始推送",
+        "启动推送",
+        "停止推送",
+        "关闭推送",
+        "推送间隔",
+        "查事件",
+        "搜事件",
+        "最近事件",
+        "查最近",
+        "有什么新事件",
+        "详细看看",
+        "那个关于"
+      ],
+      "steps": [
+        {
+          "stage": "加载技能",
+          "action": "read skills/event-push/SKILL.md and follow it"
+        }
+      ],
+      "notes": "优先级高于 research/finance pipeline。只要命中 detect 关键词，必须走 event-push SKILL.md，不走通用问答。"
+    },
+    "writing": {
+      "detect": [
+        "写作",
+        "邮件",
+        "文案",
+        "报告",
+        "文章",
+        "总结",
+        "提纲",
+        "润色"
+      ],
+      "steps": [
+        {
+          "stage": "大纲",
+          "model": "deepseekdata/deepseek-chat"
+        },
+        {
+          "stage": "正文",
+          "model": "deepseekdata/deepseek-v3"
+        },
+        {
+          "stage": "润色",
+          "model": "deepseekdata/gpt-5.1"
+        }
+      ]
+    }
+  },
+  "finance": {
+    "auto": true,
+    "dualTrack": true,
+    "triggers": [
+      "公司",
+      "股份",
+      "代码",
+      "基金",
+      "指数",
+      "营收",
+      "净利",
+      "ROE",
+      "现金流",
+      "估值",
+      "回撤",
+      "ETF",
+      "板块",
+      "行业",
+      "CPI",
+      "M2",
+      "GDP",
+      "LPR",
+      "美股",
+      "A股",
+      "财报",
+      "业绩",
+      "指引"
+    ],
+    "tools": [
+      "web_search",
+      "qveris"
+    ],
+    "qveris": {
+      "tokenOrder": [
+        "env:QVERIS_API_TOKEN",
+        "file:secrets/qveris_token.txt"
+      ],
+      "fallbackToWebOnly": true
+    },
+    "outputContract": [
+      "结论先行",
+      "面向懂金融但不懂 AI 的专业金融人员",
+      "高可读性",
+      "避免工具痕迹",
+      "区分事实、推断、风险"
+    ]
+  },
+  "research": {
+    "notes": [
+      "尽量使用绝对日期",
+      "优先一手来源",
+      "若 web_search 提供器不支持 language 过滤，不要强依赖 language 参数"
+    ]
+  },
+  "directives": {
+    "这轮用 chat": "deepseekdata/deepseek-chat",
+    "这轮用 v3": "deepseekdata/deepseek-v3",
+    "这轮用 gpt-5.4": "openrouter/openai/gpt-5.4",
+    "这轮用 code": "openrouter/anthropic/claude-sonnet-4.6"
+  }
+}

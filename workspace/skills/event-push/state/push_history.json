@@ -1,0 +1,20 @@
+{
+  "max_batches": 3,
+  "batches": [
+    {
+      "push_time": "2026-04-10T11:49:03+08:00",
+      "keyword": "AI",
+      "events": []
+    },
+    {
+      "push_time": "2026-04-10T11:44:04+08:00",
+      "keyword": "AI",
+      "events": []
+    },
+    {
+      "push_time": "2026-04-10T11:39:13+08:00",
+      "keyword": "AI",
+      "events": []
+    }
+  ]
+}
