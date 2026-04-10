@@ -4,12 +4,13 @@
 - get_event_detail(keyword, event_id): 获取单个事件详情
 """
 
+import os
 import requests
 from datetime import datetime, timedelta, timezone
 
 BASE_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
 HEADERS = {
-    "X-API-Key": "sk-test-local-20260315",
+    "X-API-Key": os.getenv("EVENT_PUSH_API_KEY", "sk-test-local-20260315"),
     "tenant-id": "1",
 }
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -95,11 +96,9 @@ def search_events(
 
     total = data.get("total", 0)
 
-    s_events = [e for e in events if e.get("signalLevel") == "S级"]
-    other_events = [e for e in events if e.get("signalLevel") != "S级"]
-    s_events.sort(key=lambda e: e.get("eventPublishDate") or "", reverse=True)
-    other_events.sort(key=lambda e: e.get("eventPublishDate") or "", reverse=True)
-    sorted_events = s_events + other_events
+    events.sort(key=lambda e: e.get("eventPublishDate") or "", reverse=True)
+    events.sort(key=lambda e: _LEVEL_PRIORITY.get(e.get("signalLevel"), 99))
+    sorted_events = events
 
     return {"total": total, "events": sorted_events[:page_size]}
 
@@ -160,6 +159,78 @@ def get_event_detail(keyword: str, event_id: str) -> dict | None:
         "transmission_logic": ic_report.get("transmission_logic"),
         "logic_library_output": logic_library,
         "historical_cases_analysis": logic_validation.get("historical_cases_analysis"),
+    }
+
+
+# ──────────────────────────────────────────────
+#  第三段：每日事件统计（S/A 级计数）
+# ──────────────────────────────────────────────
+def daily_event_summary(keyword: str, minutes: int = 1440) -> dict:
+    """
+    统计过去 N 分钟（默认 1440 = 24h）内的 S 级和 A 级事件数量。
+
+    采用分页拉取以获得准确计数：先查总数，再按需翻页收集所有事件的
+    signalLevel，最终按等级汇总。
+
+    Returns:
+        {
+            "window_minutes": 1440,
+            "total": 整体命中数,
+            "S级": S级数量,
+            "A级": A级数量,
+            "other": 其他等级数量,
+            "start": "2026-04-09 12:00:00",
+            "end":   "2026-04-10 12:00:00"
+        }
+    """
+    now = datetime.now(tz=_BJT)
+    start = now - timedelta(minutes=minutes)
+
+    batch_size = 50
+    params = {
+        "keyword": keyword,
+        "eventPublishDateStart": start.strftime(DATE_FMT),
+        "eventPublishDateEnd": now.strftime(DATE_FMT),
+        "pageNo": 1,
+        "pageSize": batch_size,
+    }
+
+    data = _request(params)
+    total = data.get("total", 0)
+
+    levels: list[str] = []
+    for item in data.get("list", []):
+        meta = item.get("analysisMetadata", {})
+        core_logic = meta.get("core_logic_output", {})
+        lvl = _safe_get(core_logic, "signal_hint", "level") or "未知"
+        levels.append(lvl)
+
+    fetched = len(levels)
+    page = 2
+    while fetched < total:
+        params["pageNo"] = page
+        data = _request(params)
+        for item in data.get("list", []):
+            meta = item.get("analysisMetadata", {})
+            core_logic = meta.get("core_logic_output", {})
+            lvl = _safe_get(core_logic, "signal_hint", "level") or "未知"
+            levels.append(lvl)
+        fetched = len(levels)
+        page += 1
+        if not data.get("list"):
+            break
+
+    s_count = sum(1 for l in levels if l == "S级")
+    a_count = sum(1 for l in levels if l == "A级")
+
+    return {
+        "window_minutes": minutes,
+        "total": total,
+        "S级": s_count,
+        "A级": a_count,
+        "other": total - s_count - a_count,
+        "start": start.strftime(DATE_FMT),
+        "end": now.strftime(DATE_FMT),
     }
 
 

@@ -11,17 +11,18 @@ description_en: Scheduled event push notifications with detail drill-down
 
 本技能分为两部分：
 
-1. **定时推送、手动获取**：按用户设定的时间间隔（默认 5 分钟），周期性调用事件语义检索 API，获取最新事件摘要并推送给用户。用户可以指定获取最近一段时间内的最新事件。
+1. **定时推送、手动获取**：按用户设定的时间间隔（默认 5 分钟），周期性调用事件语义检索 API，获取最新事件摘要并推送给用户。**无新事件时静默跳过，不发送消息。** 用户可以指定获取最近一段时间内的最新事件。
 2. **事件详情查询**：当用户对某条推送的事件感兴趣时，通过 `eventId` 调用详情接口获取完整分析数据。
+3. **每日事件统计**：每 24 小时自动统计 S 级、A 级事件数量，生成简报推送。随定时推送一起启停。
 
 ## 文件结构
 
 ```
 event-push/
 ├── SKILL.md              # 本文件，技能说明
-├── event_query.py         # API 调用脚本（search_events / get_event_detail）
+├── event_query.py         # API 调用脚本（search_events / get_event_detail / daily_event_summary）
 └── state/
-    ├── push_config.json   # 推送运行时配置（间隔、关键词、上次推送时间等）
+    ├── push_config.json   # 推送运行时配置（间隔、关键词、上次推送时间、每日统计开关等）
     └── push_history.json  # 最近几次推送的事件列表缓存（用于按序号/描述查详情）
 ```
 
@@ -29,7 +30,7 @@ event-push/
 
 - Python 3.10+，已安装 `requests` 库
 - 网络可达 `https://admin.deepseekdata.com`
-- API Key 已硬编码在 `event_query.py` 中，无需额外配置
+- API Key 优先读取环境变量 `EVENT_PUSH_API_KEY`，未设置时使用内置默认值
 
 ## 环境适配
 
@@ -69,8 +70,9 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
    - `keyword`：语义检索关键词（默认 "AI"，用户可改为任意主题，比如：半导体、机器人、新能源）
    - `page_size`：每次推送返回的事件条数（默认 10）
 3. **写入配置**：将确认后的参数写入 `state/push_config.json`。
-4. **立即执行一次推送**：调用 `search_events()` 获取当前时间窗口内的事件，格式化后推送给用户。
+4. **立即执行一次推送**：调用 `search_events()` 获取当前时间窗口内的事件，格式化后推送给用户（如果无事件则静默跳过）。
 5. **设置定时任务**：利用 OpenClaw 的 cron 机制，按 `interval_minutes` 的间隔周期执行推送。
+6. **同时启动每日统计**：创建一个每 24 小时执行一次的 cron 任务，用于统计 S/A 级事件数量（详见下方"每日事件统计"章节）。
 
 ### 推送执行逻辑
 
@@ -83,7 +85,7 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
    import json, sys
    sys.stdout.reconfigure(encoding='utf-8')
    from event_query import search_events
-   result = search_events(keyword='<KEYWORD>', minutes=<INTERVAL_MINUTES>, page_size=<PAGE_SIZE>)
+   result = search_events(keyword=\"\"\"<KEYWORD>\"\"\", minutes=<INTERVAL_MINUTES>, page_size=<PAGE_SIZE>)
    print(json.dumps(result, ensure_ascii=False, indent=2))
    "
    ```
@@ -116,14 +118,8 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
 
    两个摘要都必须输出，不可省略。`original_summary` 偏产业链视角，`summary` 偏事件本身，互相补充。
 
-4. 如果 `total == 0`，推送简短提示：
-   ```
-   📡 事件推送 (HH:MM)  —— 最近 N 分钟暂无新事件
-
-   💡 想换个主题试试？说「关注半导体」即可切换关键词。
-   ⏱️ 想调整推送频率？说「改为15分钟推送一次」。
-   ```
-5. **缓存推送结果**：将本次推送的事件列表写入 `state/push_history.json`，供后续详情查询使用（见下方"推送历史缓存"章节）。
+4. 如果 `total == 0`，**静默跳过，不向用户发送任何消息**。仅更新 `state/push_config.json` 中的 `last_push_time`，不写入推送历史，不输出任何内容。
+5. **缓存推送结果**（仅 `total > 0` 时执行）：将本次推送的事件列表写入 `state/push_history.json`，供后续详情查询使用（见下方"推送历史缓存"章节）。
 6. 更新 `state/push_config.json` 中的 `last_push_time`。
 
 ### 推送历史缓存
@@ -223,9 +219,66 @@ with open(history_path, 'w') as f:
 
 当用户说"停止推送"/"关闭推送"等：
 
-1. 移除 cron 定时任务。
-2. 更新 `state/push_config.json`，将 `active` 设为 `false`。
-3. 回复用户确认："已停止事件推送。随时可以说'开始推送'重新启动。"
+1. 移除事件推送的 cron 定时任务。
+2. **同时移除每日统计的 cron 定时任务**（如果存在）。
+3. 更新 `state/push_config.json`，将 `active` 设为 `false`。
+4. 回复用户确认："已停止事件推送和每日统计。随时可以说'开始推送'重新启动。"
+
+---
+
+### 每日事件统计
+
+#### 概述
+
+与定时推送配套的 24 小时周期统计功能。启动推送时自动一并启动，停止推送时一并关闭。统计过去 24 小时内按信号等级（S 级、A 级）的事件数量，以简报形式推送给用户。
+
+#### 启动方式
+
+随定时推送一起自动启动，**不需要**用户单独触发。启动推送时：
+
+1. 在设置事件推送 cron 的同时，额外创建一个 **每 24 小时执行一次** 的 cron 定时任务。
+2. 该 cron 任务的执行内容是：调用 `daily_event_summary()` 并将结果格式化输出给用户。
+3. 在 `state/push_config.json` 中记录 `daily_summary_active: true`。
+
+#### 执行逻辑
+
+每次执行时：
+
+1. 运行以下命令获取统计数据：
+   ```bash
+   cd "$SKILL_DIR"
+   $PY -c "
+   import json, sys
+   sys.stdout.reconfigure(encoding='utf-8')
+   from event_query import daily_event_summary
+   result = daily_event_summary(keyword=\"\"\"<KEYWORD>\"\"\", minutes=1440)
+   print(json.dumps(result, ensure_ascii=False, indent=2))
+   "
+   ```
+2. 解析返回的 JSON。
+3. 如果 `total > 0`，按以下格式输出给用户：
+
+   ```
+   📊 每日事件统计 (HH:MM)
+   ━━━━━━━━━━━━━━━━━━━━━━━━
+   🔍 关键词: <KEYWORD>
+   📅 统计周期: YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM（过去 24 小时）
+
+   🔴 S 级事件: X 条
+   🟠 A 级事件: Y 条
+   📋 其他等级: Z 条
+   ── 合计: N 条
+
+   💡 想查看具体事件？说「查最近24小时的事件」。
+   ```
+
+4. 如果 `total == 0`，**静默跳过，不发送任何消息**（与事件推送保持一致）。
+
+#### 停止方式
+
+随定时推送一起关闭，无需单独操作。
+
+---
 
 ### 手动查询事件
 
@@ -255,7 +308,7 @@ $PY -c "
 import json, sys
 sys.stdout.reconfigure(encoding='utf-8')
 from event_query import search_events
-result = search_events(keyword='<KEYWORD>', minutes=<MINUTES>, page_size=<PAGE_SIZE>)
+result = search_events(keyword=\"\"\"<KEYWORD>\"\"\", minutes=<MINUTES>, page_size=<PAGE_SIZE>)
 print(json.dumps(result, ensure_ascii=False, indent=2))
 "
 ```
@@ -297,7 +350,7 @@ $PY -c "
 import json, sys
 sys.stdout.reconfigure(encoding='utf-8')
 from event_query import get_event_detail
-detail = get_event_detail(keyword='<KEYWORD>', event_id='<EVENT_ID>')
+detail = get_event_detail(keyword=\"\"\"<KEYWORD>\"\"\", event_id='<EVENT_ID>')
 print(json.dumps(detail, ensure_ascii=False, indent=2))
 "
 ```
@@ -456,17 +509,19 @@ historical_cases_analysis 的完整内容
   "interval_minutes": 5,
   "keyword": "AI",
   "page_size": 10,
-  "last_push_time": null
+  "last_push_time": null,
+  "daily_summary_active": false
 }
 ```
 
-| 字段               | 类型    | 说明                          |
-|--------------------|---------|-------------------------------|
-| `active`           | bool    | 推送是否正在运行               |
-| `interval_minutes` | int     | 推送间隔，单位分钟，默认 5     |
-| `keyword`          | string  | 语义检索关键词，默认 "AI"      |
-| `page_size`        | int     | 每次推送返回的事件条数，默认 10 |
-| `last_push_time`   | string  | 上次推送时间 (ISO 格式)，初始为 null |
+| 字段                    | 类型    | 说明                                              |
+|-------------------------|---------|---------------------------------------------------|
+| `active`                | bool    | 推送是否正在运行                                   |
+| `interval_minutes`      | int     | 推送间隔，单位分钟，默认 5                         |
+| `keyword`               | string  | 语义检索关键词，默认 "AI"                          |
+| `page_size`             | int     | 每次推送返回的事件条数，默认 10                     |
+| `last_push_time`        | string  | 上次推送时间 (ISO 格式)，初始为 null               |
+| `daily_summary_active`  | bool    | 每日统计是否正在运行，随 active 一起启停            |
 
 ---
 
@@ -490,6 +545,7 @@ historical_cases_analysis 的完整内容
 
 - **时区统一为北京时间（UTC+8）**：所有写入配置文件和推送历史的时间戳必须使用北京时间，格式示例 `2026-04-09T14:01:30+08:00`。严禁使用 UTC 时间或带 `Z` 后缀的时间戳。`datetime.now()` 在系统时区为 `Asia/Shanghai` 或 `Asia/Beijing` 时已返回北京时间，直接使用即可。
 - 全程使用中文输出。
+- **定时推送和每日统计在无新事件时必须静默跳过**，不向用户发送任何消息（包括"暂无新事件"提示）。只有手动查询才会展示"暂无新事件"的提示。
 - 推送内容保持简洁，突出标题、信号等级和摘要，方便用户快速浏览。
 - 详情查询时完整展示所有返回字段，需要映射成中文呈现，帮助用户做深入研判。
 - 如果 API 调用失败，直接告知用户"事件数据获取失败"及错误原因，不编造数据。
