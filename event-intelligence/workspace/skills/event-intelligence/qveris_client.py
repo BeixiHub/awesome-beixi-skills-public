@@ -39,6 +39,18 @@ class QVerisConfig:
 
 
 class QVerisClient:
+    # Hard cap on ANY network read from Qveris endpoints — covers both
+    # `/search`, `/tools/execute` JSON responses in `_post_json` and the
+    # signed-OSS full-content download in `download_full_content`.
+    # Largest observed real execute response is ~340KB; 5MB leaves ~15x
+    # margin for schema growth and still blocks a poisoned / misbehaving
+    # endpoint from exhausting skill memory.
+    MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+
+    # Cap on HTTPError response body used purely for diagnostic messages —
+    # 4KB is more than enough for any sane JSON error envelope.
+    MAX_ERROR_BODY_BYTES = 4096
+
     def __init__(self, config: Optional[QVerisConfig] = None) -> None:
         self.config = config or QVerisConfig()
         if not self.config.api_key:
@@ -53,15 +65,25 @@ class QVerisClient:
         request = Request(url, data=data, headers=self.headers, method="POST")
         try:
             with urlopen(request, timeout=self.config.timeout) as response:
-                raw = response.read().decode("utf-8")
+                # Read one extra byte so we can detect overflow; a cooperating
+                # server will always fit under MAX_RESPONSE_BYTES.
+                raw_bytes = response.read(self.MAX_RESPONSE_BYTES + 1)
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            body = (
+                exc.read(self.MAX_ERROR_BODY_BYTES).decode("utf-8", errors="replace")
+                if exc.fp
+                else ""
+            )
             raise RuntimeError(
                 f"QVeris HTTP error {exc.code}: {body or exc.reason}"
             ) from exc
         except URLError as exc:
             raise RuntimeError(f"QVeris request failed: {exc.reason}") from exc
-        return json.loads(raw)
+        if len(raw_bytes) > self.MAX_RESPONSE_BYTES:
+            raise RuntimeError(
+                f"QVeris response exceeded limit {self.MAX_RESPONSE_BYTES} bytes"
+            )
+        return json.loads(raw_bytes.decode("utf-8"))
 
     def search_tools(self, query: str, limit: int = 10) -> Dict[str, Any]:
         payload = {"query": query, "limit": limit}
@@ -82,11 +104,6 @@ class QVerisClient:
         url = f"{self.config.base_url}/tools/execute?tool_id={tool_id}"
         return self._post_json(url, payload)
 
-    # Hard cap on full-content OSS downloads. The largest observed real
-    # response is ~340KB; 5MB leaves ~15x margin for schema growth and still
-    # blocks a poisoned / misbehaving URL from exhausting skill memory.
-    MAX_FULL_CONTENT_BYTES = 5 * 1024 * 1024
-
     def download_full_content(self, url: str) -> Any:
         """Fetch the signed OSS URL returned when an execute_tool response is truncated.
 
@@ -94,11 +111,11 @@ class QVerisClient:
         when the raw tool response exceeds `max_response_size`. The downloaded
         file contains the original tool response as-is.
 
-        Enforces `MAX_FULL_CONTENT_BYTES` on both the pre-read `Content-Length`
+        Enforces `MAX_RESPONSE_BYTES` on both the pre-read `Content-Length`
         header (when present) and the actual bytes read, so a misbehaving URL
         cannot OOM the skill process.
         """
-        limit = self.MAX_FULL_CONTENT_BYTES
+        limit = self.MAX_RESPONSE_BYTES
         try:
             with urlopen(url, timeout=self.config.timeout) as response:
                 declared = response.headers.get("Content-Length")
@@ -116,7 +133,11 @@ class QVerisClient:
                 # Content-Length is missing or understated.
                 raw_bytes = response.read(limit + 1)
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            body = (
+                exc.read(self.MAX_ERROR_BODY_BYTES).decode("utf-8", errors="replace")
+                if exc.fp
+                else ""
+            )
             raise RuntimeError(
                 f"QVeris full-content download HTTP error {exc.code}: {body or exc.reason}"
             ) from exc

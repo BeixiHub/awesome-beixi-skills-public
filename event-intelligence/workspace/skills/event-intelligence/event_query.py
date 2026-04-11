@@ -42,6 +42,13 @@ def _ensure_search_id(client: QVerisClient) -> str:
         query="deepseekdata semantic event list financial industry",
         limit=10,
     )
+    # Qveris /search doesn't return a `success` flag — the presence of
+    # `search_id` is the only reliable success indicator. Validate shape
+    # before indexing so we emit a clear diagnostic instead of a KeyError.
+    if not isinstance(result, dict) or "search_id" not in result:
+        raise RuntimeError(
+            f"Qveris search_tools returned unexpected shape: {json.dumps(result)[:300]}"
+        )
     tool_ids = [t.get("tool_id") for t in result.get("results", [])]
     if QVERIS_TOOL_ID not in tool_ids:
         raise RuntimeError(
