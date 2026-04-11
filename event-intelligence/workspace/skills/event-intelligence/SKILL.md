@@ -20,7 +20,8 @@ description_en: Scheduled event push notifications with detail drill-down
 ```
 event-intelligence/
 ├── SKILL.md              # 本文件，技能说明
-├── event_query.py         # API 调用脚本（search_events / get_event_detail / daily_event_summary）
+├── event_query.py         # 业务函数（search_events / get_event_detail / daily_event_summary）
+├── qveris_client.py       # Qveris REST 客户端（search + execute_tool）
 └── state/
     ├── push_config.json   # 推送运行时配置（间隔、关键词、上次推送时间、每日统计开关等）
     └── push_history.json  # 最近几次推送的事件列表缓存（用于按序号/描述查详情）
@@ -28,9 +29,9 @@ event-intelligence/
 
 ## 前置条件
 
-- Python 3.10+，已安装 `requests` 库
-- 网络可达 `https://admin.deepseekdata.com`
-- API Key 通过环境变量 `EVENT_INTEL_API_KEY` 读取，必须提前配置
+- Python 3.10+（仅依赖 stdlib，无需 pip 安装任何包）
+- 网络可达 `https://qveris.ai`
+- API Key 通过环境变量 `QVERIS_TOKEN` 读取，必须提前配置。事件数据通过 Qveris 平台调用 deepseekdata 语义事件检索工具，无需本地持有 deepseekdata 独立 API Key。
 
 ## 环境适配
 
