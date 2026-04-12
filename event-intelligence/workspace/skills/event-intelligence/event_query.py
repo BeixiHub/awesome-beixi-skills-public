@@ -2,27 +2,104 @@
 事件语义检索工具
 - search_events(keyword, minutes, ...): 批量检索事件摘要
 - get_event_detail(keyword, event_id): 获取单个事件详情
+
+底层通过 Qveris 平台调用 deepseekdata 语义事件检索工具，无需本地
+持有 deepseekdata API Key，只需设置 QVERIS_TOKEN 环境变量。
 """
 
-import os
-import requests
+import json
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-BASE_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
-HEADERS = {
-    "X-API-Key": os.getenv("EVENT_INTEL_API_KEY", ""),
-    "tenant-id": "1",
-}
+from qveris_client import QVerisClient
+
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
+
+# Qveris 上 deepseekdata 事件语义检索工具的固定 ID。
+# 若该 tool 被重命名或下线，首次 search 时会显式报错指出。
+QVERIS_TOOL_ID = "deepseekdata.event_analysis.events.list.v1.32c03d20"
+
+# 实测单响应 ~155KB，设 300KB 留 ~2x 余量防 schema 扩展。
+_MAX_RESP = 300_000
+
+_client_singleton: Optional[QVerisClient] = None
+# 进程生命周期内复用 search_id；进程重启会重新获取。
+_search_id_cache: Optional[str] = None
+
+
+def _get_client() -> QVerisClient:
+    global _client_singleton
+    if _client_singleton is None:
+        _client_singleton = QVerisClient()
+    return _client_singleton
+
+
+def _ensure_search_id(client: QVerisClient) -> str:
+    global _search_id_cache
+    if _search_id_cache:
+        return _search_id_cache
+    result = client.search_tools(
+        query="deepseekdata semantic event list financial industry",
+        limit=10,
+    )
+    # Qveris /search doesn't return a `success` flag — the presence of
+    # `search_id` is the only reliable success indicator. Validate shape
+    # before indexing so we emit a clear diagnostic instead of a KeyError.
+    if not isinstance(result, dict) or "search_id" not in result:
+        raise RuntimeError(
+            f"Qveris search_tools returned unexpected shape: {json.dumps(result)[:300]}"
+        )
+    tool_ids = [t.get("tool_id") for t in result.get("results", [])]
+    if QVERIS_TOOL_ID not in tool_ids:
+        raise RuntimeError(
+            f"Expected tool {QVERIS_TOOL_ID} not found in Qveris search results. "
+            f"Got: {tool_ids}. Has the tool been removed or renamed?"
+        )
+    _search_id_cache = result["search_id"]
+    return _search_id_cache
 
 
 def _request(params: dict) -> dict:
-    resp = requests.get(BASE_URL, headers=HEADERS, params=params, timeout=30)
-    resp.raise_for_status()
-    result = resp.json()
-    if result.get("code") != 0:
-        raise RuntimeError(f"API error: {result.get('msg')}")
-    return result["data"]
+    client = _get_client()
+    envelope = client.execute_tool(
+        tool_id=QVERIS_TOOL_ID,
+        search_id=_ensure_search_id(client),
+        parameters=params,
+        max_response_size=_MAX_RESP,
+    )
+    if not envelope.get("success"):
+        raise RuntimeError(f"Qveris execute_tool failed: {envelope}")
+
+    result = envelope.get("result", {})
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            f"Qveris returned unexpected result type: {type(result).__name__}"
+        )
+
+    # Broker 层故障：upstream HTTP 非 200 或 result.error 不为空。
+    # 要在尝试解包 data 之前拦截，否则错误会被后面的 shape check 吞掉，诊断变模糊。
+    upstream_status = result.get("status_code")
+    if upstream_status is not None and upstream_status != 200:
+        raise RuntimeError(
+            f"Qveris broker upstream HTTP {upstream_status}: "
+            f"{result.get('message') or result.get('error')}"
+        )
+    if result.get("error"):
+        raise RuntimeError(f"Qveris broker error: {result.get('error')}")
+
+    # 正常路径：result.data 直接是 deepseekdata 原始响应 {code, msg, data: {list, total}}
+    raw = result.get("data")
+    # 截断路径：原始响应 > max_response_size 时 Qveris 改放 full_content_file_url，
+    # 需要额外下载一次拿到完整响应（内容结构与正常路径一致）。
+    if raw is None and result.get("full_content_file_url"):
+        raw = client.download_full_content(result["full_content_file_url"])
+    if not isinstance(raw, dict):
+        raise RuntimeError(
+            f"Qveris returned unexpected result shape: {json.dumps(result)[:300]}"
+        )
+    if raw.get("code") != 0:
+        raise RuntimeError(f"deepseekdata API error: {raw.get('msg')}")
+    return raw["data"]
 
 
 def _safe_get(d: dict, *keys, default=None):
@@ -37,6 +114,7 @@ def _safe_get(d: dict, *keys, default=None):
 
 
 _BJT = timezone(timedelta(hours=8))
+
 
 def _format_ts(ts) -> str | None:
     if ts is None:
@@ -85,14 +163,16 @@ def search_events(
         core_logic = meta.get("core_logic_output", {})
         ic_report = meta.get("ic_report_v10_output", {})
 
-        events.append({
-            "eventId": item.get("eventId"),
-            "compliantTitle": item.get("compliantTitle"),
-            "eventPublishDate": _format_ts(item.get("eventPublishDate")),
-            "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
-            "original_summary": core_logic.get("original_summary"),
-            "summary": ic_report.get("summary"),
-        })
+        events.append(
+            {
+                "eventId": item.get("eventId"),
+                "compliantTitle": item.get("compliantTitle"),
+                "eventPublishDate": _format_ts(item.get("eventPublishDate")),
+                "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
+                "original_summary": core_logic.get("original_summary"),
+                "summary": ic_report.get("summary"),
+            }
+        )
 
     total = data.get("total", 0)
 
@@ -138,12 +218,14 @@ def get_event_detail(keyword: str, event_id: str) -> dict | None:
 
     targets_summary = []
     for t in item.get("investmentTargetsSummary", []):
-        targets_summary.append({
-            "relevance": t.get("relevance"),
-            "target_code": t.get("target_code"),
-            "target_name": t.get("target_name"),
-            "research_opinion": t.get("research_opinion"),
-        })
+        targets_summary.append(
+            {
+                "relevance": t.get("relevance"),
+                "target_code": t.get("target_code"),
+                "target_name": t.get("target_name"),
+                "research_opinion": t.get("research_opinion"),
+            }
+        )
 
     return {
         "compliantTitle": item.get("compliantTitle"),
