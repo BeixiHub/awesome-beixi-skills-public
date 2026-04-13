@@ -62,6 +62,12 @@
 | `docs.portfolio-health-check-api.md` | 三个 RESTful API 的接口规范 |
 | `DEPLOY_OPENCLAW_CLIENT.md` | 客户端部署指南 |
 
+## [2026-04-13] 固定 API 地址回退
+
+- `call_remote_phase_api.py` 现在默认回退到固定服务器 `http://82.157.41.134:9000`
+- `PORTFOLIO_API_BASE_URL` 和 `--base-url` 仍然可以覆盖默认值
+- 这样在固定部署环境下，直接调用 skill 不会因为缺少 API 地址配置而报错
+
 ## 删除文件
 
 | 目录/文件 | 原因 |

@@ -71,11 +71,16 @@ OpenClaw 客户端至少需要这两个配置：
 - `PORTFOLIO_API_BASE_URL`
 - `PORTFOLIO_API_TOKEN`（如服务端启用鉴权）
 
-当前桥接脚本 [call_remote_phase_api.py](./call_remote_phase_api.py) 不再内置默认服务地址。
+当前桥接脚本 [call_remote_phase_api.py](./call_remote_phase_api.py) 已内置固定服务地址：
+
+```bash
+http://82.157.41.134:9000
+```
 
 这意味着：
 
-- OpenClaw 运行环境必须显式设置 `PORTFOLIO_API_BASE_URL`，或在命令行里传 `--base-url`
+- OpenClaw 不额外配置时，也可以直接连接固定服务器运行
+- 如果要切换到其他环境，可通过 `PORTFOLIO_API_BASE_URL` 或 `--base-url` 覆盖
 - 如果后续切换环境，只需要覆盖 `PORTFOLIO_API_BASE_URL`
 - `PORTFOLIO_API_TOKEN` 仍然保留为可选鉴权项
 

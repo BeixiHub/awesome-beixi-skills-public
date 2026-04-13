@@ -9,7 +9,7 @@
 ```
 ┌──────────────┐     HTTP POST      ┌──────────────────┐
 │  Claude Skill │ ──────────────────→ │  远端 API 服务器   │
-│  (本地客户端)   │  call_remote_...  │  由环境变量指定     │
+│  (本地客户端)   │  call_remote_...  │  固定地址 / 环境变量覆盖 │
 │              │ ←────────────────── │                  │
 └──────────────┘    JSON / PDF      └──────────────────┘
 ```
@@ -35,7 +35,7 @@
 1. 解析命令行参数
    ├── phase:        phase2 | phase2_pdf | phase3
    ├── payload_file: 本地 JSON 文件路径
-   ├── --base-url:   API 地址（可选，默认读环境变量）
+   ├── --base-url:   API 地址（可选，默认读环境变量，未设置则回退固定服务器）
    ├── --token:      Bearer Token（可选，默认读环境变量）
    └── --output:     结果写入路径（可选，默认输出到 stdout）
 
@@ -75,7 +75,7 @@
 
 | 变量名 | 用途 | 默认值 |
 |--------|------|--------|
-| `PORTFOLIO_API_BASE_URL` | API 服务器地址 | 无，必须显式提供 |
+| `PORTFOLIO_API_BASE_URL` | API 服务器地址 | `http://82.157.41.134:9000` |
 | `PORTFOLIO_API_TOKEN` | Bearer 认证 Token | 空（不认证） |
 
 ### 命令行参数
@@ -84,11 +84,11 @@
 |------|------|
 | `phase` | 必填，`phase2` / `phase2_pdf` / `phase3` |
 | `payload_file` | 必填，JSON payload 文件路径 |
-| `--base-url` | 可选，覆盖环境变量；未提供时必须设置 `PORTFOLIO_API_BASE_URL` |
+| `--base-url` | 可选，覆盖环境变量；未提供时默认回退固定服务器 |
 | `--token` | 可选，覆盖环境变量 |
 | `--output` | 可选，结果写入文件路径（不指定则输出到 stdout） |
 
-优先级：`--命令行参数` > `环境变量`
+优先级：`--命令行参数` > `环境变量` > 固定服务器地址
 
 ---
 
@@ -127,6 +127,12 @@ python call_remote_phase_api.py phase3 phase3_payload.json \
 PORTFOLIO_API_BASE_URL=http://localhost:9000 \
 PORTFOLIO_API_TOKEN=my-secret-token \
 python call_remote_phase_api.py phase2 payload.json
+```
+
+如果您不传 `--base-url`，也没有设置 `PORTFOLIO_API_BASE_URL`，脚本会默认使用固定服务器：
+
+```bash
+http://82.157.41.134:9000
 ```
 
 ---

@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 DEFAULT_TIMEOUT = 180
-DEFAULT_BASE_URL = ""
+DEFAULT_BASE_URL = "http://82.157.41.134:9000"
 DEFAULT_RETRY_ATTEMPTS = 2
 
 
@@ -100,8 +100,8 @@ def parse_args() -> argparse.Namespace:
         "--base-url",
         default=os.getenv("PORTFOLIO_API_BASE_URL", DEFAULT_BASE_URL).strip(),
         help=(
-            "Remote API base URL; defaults to PORTFOLIO_API_BASE_URL. "
-            "Required when the environment variable is unset."
+            "Remote API base URL; defaults to PORTFOLIO_API_BASE_URL and "
+            "falls back to the fixed portfolio API server when unset."
         ),
     )
     parser.add_argument(
@@ -114,10 +114,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if not args.base_url:
-        raise SystemExit(
-            "missing remote api base url; set PORTFOLIO_API_BASE_URL or pass --base-url"
-        )
 
     payload_path = Path(args.payload_file)
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
