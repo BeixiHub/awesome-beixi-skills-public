@@ -68,3 +68,28 @@
 |----------|------|
 | `scripts/portfolio-health-check/` (60+ 文件) | 计算代码已封装到远端 API 服务器，客户端不再需要 |
 | `.cursor/skills/portfolio-health-check/state/` | 重复的 state 文件，统一使用 `state/` 目录 |
+
+---
+
+## [2026-04-13 15:30] PR Review 修复
+
+### `call_remote_phase_api.py`
+
+- 移除硬编码默认地址，`PORTFOLIO_API_BASE_URL` 改为必须显式提供
+- 增加 1 次超时类 `URLError` 自动重试，降低瞬时网络抖动导致的直接失败
+- 修复 `download_pdf()` 的响应读取方式，改为先一次性读取 body，再判断 `Content-Type`
+
+### 文档同步
+
+- `docs.portfolio-health-check-api.md` 统一到实际客户端使用的端点：
+  - `/api/v1/phase-2/deep-diagnosis`
+  - `/api/v1/phase-2/deep-diagnosis/pdf`
+  - `/api/v1/phase-3/optimization`
+- `DEPLOY_OPENCLAW_CLIENT.md` 删除与当前分支内容不一致的旧脚本保留说明，修正本机绝对路径链接
+- `docs.call-remote-phase-api.md` 同步更新为“代码不内置地址，运行环境显式配置”的部署方式
+
+### 部署约定
+
+- 代码仓库不再硬编码服务地址
+- 团队当前固定服务地址仍可通过环境变量预置：
+  - `PORTFOLIO_API_BASE_URL=http://82.157.41.134:9000`

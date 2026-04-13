@@ -91,7 +91,7 @@ Phase 1 当前更偏向由 LLM / skill 驱动的快速诊断阶段，输出以�
 
 ## 接口二：深度诊断
 
-`POST /api/v1/portfolio/deep-diagnosis`
+`POST /api/v1/phase-2/deep-diagnosis`
 
 量化技术分析，需收集 4 个核心分析参数；可选补充组合总市值。
 
@@ -204,11 +204,19 @@ Phase 2 成功时，除通用 envelope 外，响应还包含 `client_output`、`
 - `artifacts` 只有显式要求输出目录或报告时才可能非空
 - `pipeline` 记录本次运行的上下文
 
+### PDF 报告端点
+
+`POST /api/v1/phase-2/deep-diagnosis/pdf`
+
+- 请求体与 JSON 深度诊断端点完全一致
+- 成功时返回 `application/pdf`
+- 失败时仍返回错误状态码和文本/JSON 错误详情
+
 ---
 
 ## 接口三：优化处方
 
-`POST /api/v1/portfolio/optimization`
+`POST /api/v1/phase-3/optimization`
 
 基于深度诊断结果 + 客户约束，生成分层优化建议和前后对比。
 

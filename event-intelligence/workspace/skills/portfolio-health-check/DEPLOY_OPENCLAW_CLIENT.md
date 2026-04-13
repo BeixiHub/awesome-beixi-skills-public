@@ -31,17 +31,12 @@ OpenClaw 客户端不再本地执行：
 - `portfolio-quick-diagnosis/`
 - `portfolio-deep-diagnosis/`
 - `portfolio-optimization/`
-- `analysis_prompt.md`
-- `report_prompt.md`
 - `state/`
 - `call_remote_phase_api.py`
-- `scripts/portfolio-health-check/qveris_client.py`
-- `scripts/portfolio-health-check/date_utils.py`
-- `scripts/portfolio-health-check/qveris_params.json`
 
 说明：
 
-- 如果 Phase 1 仍然在本地通过 QVeris 做标的识别，那么 `qveris_client.py` 需要保留。
+- `analysis_prompt.md` 和 `report_prompt.md` 位于 `portfolio-quick-diagnosis/` 子目录下，会随子技能目录一起保留。
 - `portfolio-deep-diagnosis/` 和 `portfolio-optimization/` 这两个 skill 目录需要保留，因为它们还承担参数收集和结果解释。
 - 这两个 skill 不再本地跑私有计算，只负责调用远端 API。
 
@@ -66,38 +61,35 @@ OpenClaw 客户端不再本地执行：
 
 这些文件和目录基本都属于 Phase 2 / Phase 3 私有实现细节，客户端没有必要持有。
 
-## 4. 客户端默认地址与环境变量
+## 4. 客户端环境变量
 
 OpenClaw 客户端至少需要这两个配置：
 
 - `PORTFOLIO_API_BASE_URL`
 - `PORTFOLIO_API_TOKEN`（如服务端启用鉴权）
 
-当前桥接脚本 [call_remote_phase_api.py](/Users/base/project_for_codex/arkClawDemo/workspace/skills/portfolio-health-check/call_remote_phase_api.py) 已内置默认地址：
-
-```text
-http://82.157.41.134:9000
-```
+当前桥接脚本 [call_remote_phase_api.py](./call_remote_phase_api.py) 不再内置默认服务地址。
 
 这意味着：
 
-- 如果 OpenClaw 运行环境里没有设置 `PORTFOLIO_API_BASE_URL`，默认就会调用 `http://82.157.41.134:9000`
+- OpenClaw 运行环境必须显式设置 `PORTFOLIO_API_BASE_URL`，或在命令行里传 `--base-url`
 - 如果后续切换环境，只需要覆盖 `PORTFOLIO_API_BASE_URL`
 - `PORTFOLIO_API_TOKEN` 仍然保留为可选鉴权项
 
-示例（用于覆盖默认地址，而不是必填）：
+当前团队默认部署可直接预置：
+
+```bash
+export PORTFOLIO_API_BASE_URL="http://82.157.41.134:9000"
+```
+
+这样客户端代码仍然不硬编码服务器地址，但运行环境会默认指向当前固定服务。
+
+完整示例：
 
 ```bash
 export PORTFOLIO_API_BASE_URL="http://82.157.41.134:9000"
 export PORTFOLIO_API_TOKEN="your-token-if-needed"
 ```
-
-如果当前 API 服务地址固定不变，最简单的部署方式就是：
-
-- 不额外配置 `PORTFOLIO_API_BASE_URL`
-- 直接使用脚本内置默认值
-
-只有在测试环境、预发布环境或将来更换服务器时，再通过环境变量覆盖。
 
 ## 5. 客户端如何调用远端 Phase 2 / Phase 3
 
