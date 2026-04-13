@@ -56,14 +56,14 @@ description: 整理持仓、补全标的识别、生成确认表和快速诊断�
 对用户提供的每个股票名或代码，调用 QVeris 识别接口获取标准信息。
 
 **调用方式**：
-在 `portfolio-health-check/workspace/` 目录下运行：
+在 `portfolio-health-check/workspace/skills/portfolio-health-check/` 目录下运行：
 
 ```bash
 python qveris_client.py identify "贵州茅台" "宁德时代" "比亚迪"
 ```
 
 **调用要求**：
-- 使用仓库内的 `workspace/qveris_client.py` 执行 `identify`
+- 使用当前技能目录内的 `qveris_client.py` 执行 `identify`
 - 一次尽量批量识别多个标的，避免逐只反复调用
 
 **期望返回**（示例）：

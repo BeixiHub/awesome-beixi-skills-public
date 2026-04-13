@@ -33,10 +33,13 @@ OpenClaw 客户端不再本地执行：
 - `portfolio-optimization/`
 - `state/`
 - `call_remote_phase_api.py`
+- `qveris_client.py`
+- `date_utils.py`
 
 说明：
 
 - `analysis_prompt.md` 和 `report_prompt.md` 位于 `portfolio-quick-diagnosis/` 子目录下，会随子技能目录一起保留。
+- `qveris_client.py` 和 `date_utils.py` 需要与 skill 主目录一同保留，供阶段一标的识别与状态持久化使用。
 - `portfolio-deep-diagnosis/` 和 `portfolio-optimization/` 这两个 skill 目录需要保留，因为它们还承担参数收集和结果解释。
 - 这两个 skill 不再本地跑私有计算，只负责调用远端 API。
 
