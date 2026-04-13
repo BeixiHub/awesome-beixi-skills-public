@@ -1,18 +1,17 @@
 # TOOLS.md - 环境配置
 
-## 文件路径
+## 路径约定
 
-- Workspace 根目录：`/root/.openclaw/workspace`
-- 自定义 Skill 目录：`/root/.openclaw/workspace/skills/`
-- 内置 Skill 目录：`/app/skills/`（不要用这个路径读自定义 skill）
-
-**重要：** 当你需要读取 skill 文件时，使用 `/root/.openclaw/workspace/skills/` 路径，不要用 `/app/skills/`。
+- 使用当前 workspace 内的相对路径读取文件
+- 自定义 skill 以当前仓库中的 `workspace/skills/` 为准
+- 不要假设固定的宿主机绝对路径或容器内部路径
 
 例如：
-- 正确：`/root/.openclaw/workspace/skills/portfolio-health-check/SKILL.md`
-- 错误：`/app/skills/portfolio-health-check/SKILL.md`
+- 推荐：`workspace/skills/event-intelligence/SKILL.md`
+- 推荐：相对于当前 workspace 根目录定位技能文件
+- 不推荐：依赖某一台机器上的绝对部署路径
 
 ## QVeris
 
-- API Token 已通过环境变量 `QVERIS_TOKEN` 配置，不需要手动设置
-- 不要尝试检查、读取或修改 QVERIS_TOKEN
+- QVeris 相关凭证应通过运行环境提供
+- 不要在仓库内写死或暴露凭证
