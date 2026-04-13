@@ -1,0 +1,585 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.3.28",
+    "lastTouchedAt": "2026-04-10T02:25:26.130Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-02-01T11:00:08.733Z",
+    "lastRunVersion": "2026.1.30",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "http://localhost:4318",
+      "protocol": "http/protobuf",
+      "serviceName": "openclaw.i-yejn6rmghs5i3z5a9pcc",
+      "traces": false,
+      "metrics": true,
+      "logs": false,
+      "sampleRate": 1,
+      "flushIntervalMs": 5000
+    },
+    "cacheTrace": {
+      "enabled": false
+    }
+  },
+  "update": {
+    "checkOnStart": false
+  },
+  "browser": {
+    "enabled": true,
+    "remoteCdpTimeoutMs": 3000,
+    "remoteCdpHandshakeTimeoutMs": 5000,
+    "defaultProfile": "chromebrowser",
+    "profiles": {
+      "chromebrowser": {
+        "cdpUrl": "http://127.0.0.1:9222",
+        "color": "#F97316"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "ark": {
+        "baseUrl": "http://sd7blf91v21t7ckeu4mbg.apigateway-cn-beijing-inner.volceapi.com/api/coding/lite/v3",
+        "apiKey": "d98ac557-1d14-4960-8a7a-f0bc54563893",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "doubao-seed-2.0-pro",
+            "name": "doubao-seed-2.0-pro",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "headers": {
+              "X-Client-Request-Id": "enterprise-arkclaw/0313/i-yejn6rmghs5i3z5a9pcc"
+            },
+            "compat": {
+              "supportsDeveloperRole": false,
+              "supportsUsageInStreaming": true
+            }
+          },
+          {
+            "id": "doubao-seed-2.0-code",
+            "name": "doubao-seed-2.0-code",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "headers": {
+              "X-Client-Request-Id": "enterprise-arkclaw/0313/i-yejn6rmghs5i3z5a9pcc"
+            },
+            "compat": {
+              "supportsDeveloperRole": false,
+              "supportsUsageInStreaming": true
+            }
+          },
+          {
+            "id": "minimax-m2.5",
+            "name": "minimax-m2.5",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "headers": {
+              "X-Client-Request-Id": "enterprise-arkclaw/0313/i-yejn6rmghs5i3z5a9pcc"
+            },
+            "compat": {
+              "supportsDeveloperRole": false,
+              "supportsUsageInStreaming": true
+            }
+          },
+          {
+            "id": "kimi-k2.5",
+            "name": "kimi-k2.5",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "headers": {
+              "X-Client-Request-Id": "enterprise-arkclaw/0313/i-yejn6rmghs5i3z5a9pcc"
+            },
+            "compat": {
+              "supportsDeveloperRole": false,
+              "supportsUsageInStreaming": true
+            }
+          },
+          {
+            "id": "glm-4.7",
+            "name": "glm-4.7",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "headers": {
+              "X-Client-Request-Id": "enterprise-arkclaw/0313/i-yejn6rmghs5i3z5a9pcc"
+            },
+            "compat": {
+              "supportsDeveloperRole": false,
+              "supportsUsageInStreaming": true
+            }
+          },
+          {
+            "id": "deepseek-v3.2",
+            "name": "deepseek-v3.2",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "headers": {
+              "X-Client-Request-Id": "enterprise-arkclaw/0313/i-yejn6rmghs5i3z5a9pcc"
+            },
+            "compat": {
+              "supportsDeveloperRole": false,
+              "supportsUsageInStreaming": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  "bindings": [
+      {
+        "agentId": "portfolio-health-check",
+        "match": {
+          "channel": "feishu",
+          "accountId": "default"
+        }
+      }
+    ],
+  "agents": {
+      "list":[
+      {
+        "id": "portfolio-health-check",
+        "name": "股权分析",
+        "workspace": "/root/.openclaw/workspace-portfolio-health-check",
+        "model": {
+          "primary": "ark/minimax-m2.5",
+          "fallbacks": ["ark/ark-code-latest"]
+        }
+      }
+      ],
+    "defaults": {
+      "model": {
+        "primary": "ark/minimax-m2.5"
+      },
+      "models": {
+        "ark/doubao-seed-2.0-pro": {},
+        "ark/doubao-seed-2.0-code": {},
+        "ark/minimax-m2.5": {},
+        "ark/kimi-k2.5": {},
+        "ark/glm-4.7": {},
+        "ark/deepseek-v3.2": {}
+      },
+      "workspace": "/root/.openclaw/workspace",
+      "compaction": {
+        "mode": "default",
+        "reserveTokensFloor": 40000
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "tools": {
+    "alsoAllow": [
+      "wecom_mcp",
+      "feishu_bitable_app",
+      "feishu_bitable_app_table",
+      "feishu_bitable_app_table_field",
+      "feishu_bitable_app_table_record",
+      "feishu_bitable_app_table_view",
+      "feishu_calendar_calendar",
+      "feishu_calendar_event",
+      "feishu_calendar_event_attendee",
+      "feishu_calendar_freebusy",
+      "feishu_chat",
+      "feishu_chat_members",
+      "feishu_create_doc",
+      "feishu_doc_comments",
+      "feishu_doc_media",
+      "feishu_drive_file",
+      "feishu_fetch_doc",
+      "feishu_get_user",
+      "feishu_im_bot_image",
+      "feishu_im_user_fetch_resource",
+      "feishu_im_user_get_messages",
+      "feishu_im_user_get_thread_messages",
+      "feishu_im_user_message",
+      "feishu_im_user_search_messages",
+      "feishu_oauth",
+      "feishu_oauth_batch_auth",
+      "feishu_search_doc_wiki",
+      "feishu_search_user",
+      "feishu_sheet",
+      "feishu_task_comment",
+      "feishu_task_subtask",
+      "feishu_task_task",
+      "feishu_task_tasklist",
+      "feishu_update_doc",
+      "feishu_wiki_space",
+      "feishu_wiki_space_node"
+    ],
+    "web": {
+      "search": {
+        "enabled": false
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "lan",
+    "controlUi": {
+      "allowedOrigins": [
+        "https://arkclaw.apigateway"
+      ],
+      "dangerouslyDisableDeviceAuth": true
+    },
+    "auth": {
+      "mode": "trusted-proxy",
+      "trustedProxy": {
+        "userHeader": "x-forwarded-user"
+      }
+    },
+    "trustedProxies": [
+      "127.0.0.1",
+      "172.31.0.0/16",
+      "66.32.0.0/16"
+    ],
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "nodes": {
+      "browser": {
+        "mode": "off"
+      }
+    }
+  },
+  "skills": {
+    "entries": {
+      "clawhub": {
+        "enabled": false
+      }
+    }
+  },
+  "plugins": {
+    "allow": [
+      "apmplus-openclaw-plugin",
+      "arkclaw-mode-switch",
+      "device-pair",
+      "diagnostics-otel",
+      "memory-lancedb-ultra",
+      "ollama",
+      "phone-control",
+      "qqbot",
+      "sglang",
+      "talk-voice",
+      "vllm",
+      "wecom-openclaw-plugin",
+      "dingtalk-connector",
+      "openclaw-lark",
+      "weibo-openclaw-plugin",
+      "janus",
+      "agent-identity",
+      "claw-sentry",
+      "browser"
+    ],
+    "slots": {
+      "memory": "memory-lancedb-ultra"
+    },
+    "entries": {
+      "qqbot": {
+        "enabled": false,
+        "config": {}
+      },
+      "feishu": {
+        "enabled": false
+      },
+      "memory-core": {
+        "enabled": false
+      },
+      "memory-lancedb-ultra": {
+        "enabled": true,
+        "config": {
+          "embedding": {
+            "provider": "local",
+            "localModelPath": "/root/.node-llama-cpp/models/hf_CompendiumLabs_bge-small-zh-v1.5-f16.gguf"
+          },
+          "autoCapture": true,
+          "autoRecall": true
+        }
+      },
+      "diagnostics-otel": {
+        "enabled": false,
+        "config": {}
+      },
+      "arkclaw-mode-switch": {
+        "enabled": true,
+        "config": {
+          "presets": {
+            "Fast": {
+              "context_window": 65536,
+              "max_tokens": 4096,
+              "thinking": "disabled",
+              "reasoning_effort": "minimal",
+              "blockAllTools": true
+            },
+            "Expert": {
+              "context_window": 262144,
+              "max_completion_tokens": 8192,
+              "thinking": "enabled",
+              "reasoning_effort": "high",
+              "blockAllTools": false
+            }
+          }
+        }
+      },
+      "apmplus-openclaw-plugin": {
+        "enabled": true,
+        "config": {
+          "endpoint": "http://localhost:4318",
+          "reportDiagnosticsLog": true,
+          "diagnosticsLogEndpoint": "http://localhost:14318",
+          "headers": {},
+          "exportIntervalMillis": 30000,
+          "debug": false,
+          "openclawNativeMetrics": true,
+          "log": true,
+          "metric": true,
+          "trace": true,
+          "allowUserDetailInfoReport": true,
+          "extraResourceAttributes": {}
+        }
+      },
+      "wecom-openclaw-plugin": {
+        "enabled": false,
+        "config": {}
+      },
+      "dingtalk-connector": {
+        "enabled": false,
+        "config": {
+          "enabled": true
+        }
+      },
+      "openclaw-lark": {
+        "enabled": true,
+        "config": {}
+      },
+      "weibo-openclaw-plugin": {
+        "enabled": false,
+        "config": {}
+      },
+      "janus": {
+        "enabled": true,
+        "config": {}
+      },
+      "agent-identity": {
+        "enabled": true,
+        "config": {
+          "identity": {
+            "workloadPoolName": "arkclaw-${CLAW_SPACE_ID}-workload",
+            "workloadName": "${CLAW_INSTANCE_ID}",
+            "credentialsMetadataUrl": "http://100.96.0.96/latest/iam/security_credentials/IDRoleForArkClaw",
+            "regionMetadataUrl": "http://100.96.0.96/latest/region_id",
+            "webchatSessionExchange": true,
+            "personalSessionMode": true,
+            "localServer": true,
+            "durationSeconds": 3600,
+            "subagentTipPropagation": false,
+            "localServerFailOpen": true
+          },
+          "userpool": {
+            "userPoolName": "arkclaw-${CLAW_SPACE_ID}-userpool",
+            "clientName": "arkclaw-${CLAW_SPACE_ID}-client",
+            "callbackUrl": "${CLAW_APIG_DOMAIN}/oauth/callback",
+            "useRelayCallback": true,
+            "autoCreate": true
+          },
+          "authz": {
+            "namespace": "arkclaw-${CLAW_SPACE_ID}-permission",
+            "agentCheck": false,
+            "toolCheck": false,
+            "skillReadCheck": false,
+            "requireRiskApproval": false,
+            "namespaceName": "default",
+            "lowRiskBypass": true,
+            "enableLlmRiskCheck": false,
+            "approvalTtlSeconds": 300
+          }
+        }
+      },
+      "claw-sentry": {
+        "enabled": true,
+        "config": {
+          "logRecord": false,
+          "enableFetch": true,
+          "enableBeforeToolCall": true,
+          "enableAfterToolCall": true,
+          "enableHeartbeat": true,
+          "failureThreshold": 3,
+          "retryInterval": 60,
+          "maxRetryInterval": 3600,
+          "timeoutMs": 30000
+        }
+      }
+    },
+    "installs": {
+      "qqbot": {
+        "source": "path",
+        "sourcePath": "/root/qqbot",
+        "installPath": "/root/.openclaw/extensions/qqbot",
+        "version": "1.2.3",
+        "installedAt": "2026-02-03T09:14:05.915Z"
+      },
+      "apmplus-openclaw-plugin": {
+        "source": "npm",
+        "spec": "@volcengine/apmplus-openclaw-plugin",
+        "installPath": "/root/.openclaw/extensions/apmplus-openclaw-plugin",
+        "version": "0.1.29",
+        "resolvedName": "@volcengine/apmplus-openclaw-plugin",
+        "resolvedVersion": "0.1.29",
+        "resolvedSpec": "@volcengine/apmplus-openclaw-plugin@0.1.29",
+        "integrity": "sha512-VrPYzK3PGhPMr65iTt0RhB98WvpZQP3TIkDnRA79tGKZs0JGfn4SuB853kgATOXhpqqbJCWg81PGZbvQICTS8w==",
+        "shasum": "5880af020fc53c077b1a9be3f5fb0fff46481654",
+        "resolvedAt": "2026-04-02T09:22:05.629Z",
+        "installedAt": "2026-04-02T09:22:38.731Z"
+      },
+      "wecom-openclaw-plugin": {
+        "source": "npm",
+        "spec": "@wecom/wecom-openclaw-plugin@2026.3.26",
+        "installPath": "/root/.openclaw/extensions/wecom-openclaw-plugin",
+        "version": "2026.3.26",
+        "resolvedName": "@wecom/wecom-openclaw-plugin",
+        "resolvedVersion": "2026.3.26",
+        "resolvedSpec": "@wecom/wecom-openclaw-plugin@2026.3.26",
+        "integrity": "sha512-I7ZNO2UYQ0YyrRGhpqRKJgo7cCO3ONZtTO/C8sOUcg0KpELqEE2HVYP/7l5eWRB7v1HT0RI/SPnG3UTviGqAXA==",
+        "shasum": "dd930c6d32788b0f0a4d4763b5b29a60dd23138a",
+        "resolvedAt": "2026-03-30T10:56:17.237Z",
+        "installedAt": "2026-03-30T10:56:22.640Z"
+      },
+      "dingtalk-connector": {
+        "source": "npm",
+        "spec": "@duckduck-cocode/dingtalk-connector@0.8.7",
+        "installPath": "/root/.openclaw/extensions/dingtalk-connector",
+        "version": "0.8.7",
+        "resolvedName": "@duckduck-cocode/dingtalk-connector",
+        "resolvedVersion": "0.8.7",
+        "resolvedSpec": "@duckduck-cocode/dingtalk-connector@0.8.7",
+        "integrity": "sha512-N5uXnGuVOlb4e5ukzfbQwFlZDdd4iQnP0savu2MoDHI2nMHWutLQWyGU4Ew715E7wCn6MTdVKyQ3cdb+beuGzA==",
+        "shasum": "30468009d2828cd05c89249601ee495fc92ce665",
+        "resolvedAt": "2026-03-30T10:56:24.032Z",
+        "installedAt": "2026-03-30T10:57:44.215Z"
+      },
+      "openclaw-lark": {
+        "source": "archive",
+        "sourcePath": "/tmp/openclaw-lark-hKo0hO/larksuite-openclaw-lark-2026.3.29.tgz",
+        "installPath": "/root/.openclaw/extensions/openclaw-lark",
+        "version": "2026.3.29",
+        "installedAt": "2026-03-30T11:13:21.163Z"
+      },
+      "weibo-openclaw-plugin": {
+        "source": "npm",
+        "spec": "@wecode-ai/weibo-openclaw-plugin",
+        "installPath": "/root/.openclaw/extensions/weibo-openclaw-plugin",
+        "version": "2.1.1",
+        "resolvedName": "@wecode-ai/weibo-openclaw-plugin",
+        "resolvedVersion": "2.1.1",
+        "resolvedSpec": "@wecode-ai/weibo-openclaw-plugin@2.1.1",
+        "integrity": "sha512-C2h/0emqWUozcZFQv7k5wr5HXz/hNqC/boim8/bSvIlfkM5mwJFX+hsKLMRVQmh6EOL2KaoJXLki1M5raKH3JA==",
+        "shasum": "5c277d0ecd876427b2f752e9e55cf172afe71d17",
+        "resolvedAt": "2026-03-30T11:20:44.637Z",
+        "installedAt": "2026-03-30T11:21:55.359Z"
+      },
+      "janus": {
+        "source": "path",
+        "sourcePath": "/root/janus/plugin",
+        "installPath": "/root/.openclaw/extensions/janus",
+        "version": "1.0.0",
+        "installedAt": "2026-04-07T09:40:31.884Z"
+      },
+      "agent-identity": {
+        "source": "archive",
+        "sourcePath": "/tmp/m1a0rz-agent-identity-0.5.3.tgz",
+        "installPath": "/root/.openclaw/extensions/agent-identity",
+        "version": "0.5.3",
+        "installedAt": "2026-04-07T09:42:46.386Z"
+      },
+      "claw-sentry": {
+        "source": "path",
+        "sourcePath": "/root/claw-sentry/package",
+        "installPath": "/root/.openclaw/extensions/claw-sentry",
+        "version": "1.2.1",
+        "installedAt": "2026-04-07T09:43:35.170Z"
+      }
+    }
+  }
+}
