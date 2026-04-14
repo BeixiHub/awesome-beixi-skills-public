@@ -7,7 +7,7 @@
 - 不要假设固定的宿主机绝对路径或容器内部路径
 
 例如：
-- 推荐：`workspace/skills/event-intelligence/SKILL.md`
+- 推荐：`workspace/skills/portfolio-health-check/SKILL.md`
 - 推荐：相对于当前 workspace 根目录定位技能文件
 - 不推荐：依赖某一台机器上的绝对部署路径
 
@@ -15,3 +15,4 @@
 
 - QVeris 相关凭证应通过运行环境提供
 - 不要在仓库内写死或暴露凭证
+- 当识别服务不可用时，可按技能说明降级为公开信息检索
