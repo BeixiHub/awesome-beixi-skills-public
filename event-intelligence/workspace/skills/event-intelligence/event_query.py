@@ -7,6 +7,7 @@
 import os
 import requests
 from datetime import datetime, timedelta, timezone
+import re
 
 BASE_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
 HEADERS = {
@@ -37,6 +38,19 @@ def _safe_get(d: dict, *keys, default=None):
 
 
 _BJT = timezone(timedelta(hours=8))
+
+# 去除摘要开头的"研报"/"研报指出"等前缀及紧跟的标点
+_REPORT_PREFIX_RE = re.compile(
+    r'^(?:研报指出|研报认为|研报显示|研报提到|研报表示|研报)'
+    r'[，,：:；;、。\s]*'
+)
+
+
+def _strip_report_prefix(text: str | None) -> str | None:
+    """去除摘要文本开头的"研报指出"等冗余前缀。"""
+    if not text:
+        return text
+    return _REPORT_PREFIX_RE.sub('', text, count=1)
 
 def _format_ts(ts) -> str | None:
     if ts is None:
@@ -90,8 +104,8 @@ def search_events(
             "compliantTitle": item.get("compliantTitle"),
             "eventPublishDate": _format_ts(item.get("eventPublishDate")),
             "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
-            "original_summary": core_logic.get("original_summary"),
-            "summary": ic_report.get("summary"),
+            "original_summary": _strip_report_prefix(core_logic.get("original_summary")),
+            "summary": _strip_report_prefix(ic_report.get("summary")),
         })
 
     total = data.get("total", 0)
@@ -149,7 +163,7 @@ def get_event_detail(keyword: str, event_id: str) -> dict | None:
         "compliantTitle": item.get("compliantTitle"),
         "eventPublishDate": _format_ts(item.get("eventPublishDate")),
         "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
-        "original_summary": core_logic.get("original_summary"),
+        "original_summary": _strip_report_prefix(core_logic.get("original_summary")),
         "investmentTargetsSummary": targets_summary,
         "investmentLogic": item.get("investmentLogic"),
         "overallReasoningChain": item.get("overallReasoningChain"),
