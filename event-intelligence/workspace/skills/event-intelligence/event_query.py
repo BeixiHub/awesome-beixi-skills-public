@@ -119,7 +119,7 @@ _BJT = timezone(timedelta(hours=8))
 
 # 去除摘要开头的"研报"/"研报指出"等前缀及紧跟的标点
 _REPORT_PREFIX_RE = re.compile(
-    r'^(?:研报指出|研报认为|研报显示|研报提到|研报表示|研报)'
+    r'^\s*(?:研报指出|研报认为|研报显示|研报提到|研报表示|研报)'
     r'[，,：:；;、。\s]*'
 )
 
@@ -129,6 +129,7 @@ def _strip_report_prefix(text: str | None) -> str | None:
     if not text:
         return text
     return _REPORT_PREFIX_RE.sub('', text, count=1)
+
 
 def _format_ts(ts) -> str | None:
     if ts is None:
@@ -244,6 +245,7 @@ def get_event_detail(keyword: str, event_id: str) -> dict | None:
         "eventPublishDate": _format_ts(item.get("eventPublishDate")),
         "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
         "original_summary": _strip_report_prefix(core_logic.get("original_summary")),
+        "summary": _strip_report_prefix(ic_report.get("summary")),
         "investmentTargetsSummary": targets_summary,
         "investmentLogic": item.get("investmentLogic"),
         "overallReasoningChain": item.get("overallReasoningChain"),
