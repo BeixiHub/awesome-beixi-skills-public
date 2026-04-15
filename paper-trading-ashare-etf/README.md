@@ -43,9 +43,9 @@
 - `trading_service.py`：CLI 入口，负责查询/下单/撤单编排
 - `broker_client.py`：模拟盘交易后端客户端（牛股网）
 - `market_data_client.py`：行情与标的检索（新浪公开接口）
-- `state/account_config.json`：账户配置
-- `state/inner_code_cache.json`：`stock_code -> inner_code` 缓存
-- `state/trade_audit_log.jsonl`：交易审计日志
+- `state/account_config.json`：账户配置模板（不提交真实凭证）
+- `state/inner_code_cache.json`：运行时生成的 `stock_code -> inner_code` 缓存
+- `state/trade_audit_log.jsonl`：运行时生成的交易审计日志
 
 ---
 
@@ -92,6 +92,8 @@ python trading_service.py cancel 95400000
 - `PAPER_TRADING_ACCOUNT_ID`
 - `PAPER_TRADING_BASE_URL`（可选）
 
+说明：仓库内的 `account_config.json` 是模板，真实凭证建议通过环境变量或本地未跟踪配置注入。
+
 ---
 
 ## 关键约束（Agent 必读）
@@ -112,5 +114,6 @@ python trading_service.py cancel 95400000
 - 修改行为前先更新 `SKILL.md`，再改代码
 - 提交前检查 `state/` 下是否包含敏感凭证
 - 避免在仓库中明文暴露真实 `user_token`
+- `state` 目录下运行产物（缓存/审计日志）不应提交到版本库
 
 如果你希望，我可以再补一版「给 OpenClaw 的最小接入示例」（包含意图识别 -> 命令调用 -> 结果转述的完整流程图和伪代码）。

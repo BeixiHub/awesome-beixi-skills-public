@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +23,10 @@ INNER_CODE_CACHE_PATH = STATE_DIR / "inner_code_cache.json"
 AUDIT_LOG_PATH = STATE_DIR / "trade_audit_log.jsonl"
 _BJT = timezone(timedelta(hours=8))
 _CACHE_WRITE_LOCK = threading.Lock()
+_DYNAMIC_SCAN_MAX_INNER_CODE = 6000
+_DYNAMIC_SCAN_MAX_ATTEMPTS = 600
+_DYNAMIC_SCAN_CONCURRENCY = 6
+_BUILD_MAP_FLUSH_EVERY = 50
 
 
 @dataclass
@@ -69,7 +74,6 @@ def load_account_config() -> AccountConfig:
     raw = load_json(ACCOUNT_CONFIG_PATH, {})
     if not isinstance(raw, dict):
         raw = {}
-    import os
 
     return AccountConfig(
         user_token=os.getenv("PAPER_TRADING_USER_TOKEN", raw.get("user_token", "")),
@@ -376,7 +380,12 @@ def fetch_quote(market_stock_code: str) -> dict[str, float] | None:
 
 
 def load_inner_code_cache() -> dict[str, int]:
-    raw = load_json(INNER_CODE_CACHE_PATH, {})
+    with _CACHE_WRITE_LOCK:
+        try:
+            raw = load_json(INNER_CODE_CACHE_PATH, {})
+        except json.JSONDecodeError:
+            # Defensive fallback: tolerate externally-corrupted/half-written cache file.
+            return {}
     if not isinstance(raw, dict):
         return {}
     result: dict[str, int] = {}
@@ -450,8 +459,9 @@ def _dynamic_resolve_single_stock(
     target_stock_code: str,
     known_inner_codes: set[int],
     cache: dict[str, int],
-    max_inner_code: int = 10000,
-    concurrency: int = 20,
+    max_inner_code: int = _DYNAMIC_SCAN_MAX_INNER_CODE,
+    max_attempts: int = _DYNAMIC_SCAN_MAX_ATTEMPTS,
+    concurrency: int = _DYNAMIC_SCAN_CONCURRENCY,
     verbose: bool = True,
 ) -> int | None:
     """
@@ -466,6 +476,8 @@ def _dynamic_resolve_single_stock(
     返回 innerCode；搜完指定范围仍未找到则返回 None。
     """
     candidates = [ic for ic in range(1, max_inner_code + 1) if ic not in known_inner_codes]
+    if len(candidates) > max_attempts:
+        candidates = candidates[:max_attempts]
     total = len(candidates)
     if total == 0:
         return None
@@ -473,7 +485,7 @@ def _dynamic_resolve_single_stock(
     if verbose:
         print(
             f"[dynamic-resolve] 目标 {target_stock_code}，扫描候选 innerCode "
-            f"{total} 个（已跳过 {max_inner_code - total} 个已知值）",
+            f"{total} 个（扫描上限 {max_attempts}，已跳过 {max_inner_code - total} 个已知值）",
             flush=True,
         )
 
@@ -575,10 +587,10 @@ def resolve_inner_code(
     raise ValueError(
         f"动态搜索完成，仍未找到 {stock_code} 的 innerCode。\n"
         f"可能原因：\n"
-        f"  • 此股票的 innerCode 在 10000 以外（极少见）\n"
+        f"  • 超出动态扫描上限（默认最多扫描 {_DYNAMIC_SCAN_MAX_ATTEMPTS} 个候选）\n"
         f"  • broker 数据库中不存在此股票\n"
         f"  • 新上市股票尚未被 broker 录入\n"
-        f"请先确认代码是否正确；如确认无误，尝试扩大范围后手动建档。"
+        f"请先确认代码是否正确；如确认无误，优先执行 build-map 建档。"
     )
 
 
@@ -730,18 +742,24 @@ def build_inner_code_map(
     errors = 0
     processed = 0
     cache_lock = threading.Lock()
+    pending_writes = 0
 
     def _save_if_discovered(inner_code: int, code: str | None) -> None:
-        nonlocal discovered
+        nonlocal discovered, pending_writes
         if not code:
             return
         normalized = normalize_code(code)
         if not normalized:
             return
         with cache_lock:
+            if cache.get(normalized) == inner_code:
+                return
             cache[normalized] = inner_code
-            save_inner_code_cache(cache)
             discovered += 1
+            pending_writes += 1
+            if pending_writes >= _BUILD_MAP_FLUSH_EVERY:
+                save_inner_code_cache(cache)
+                pending_writes = 0
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -763,6 +781,10 @@ def build_inner_code_map(
     except KeyboardInterrupt:
         if verbose:
             print("[build-map] 中断，已保存进度", flush=True)
+    finally:
+        with cache_lock:
+            if pending_writes > 0:
+                save_inner_code_cache(cache)
 
     return {
         "status": "ok",

@@ -10,9 +10,9 @@
 
 默认行为：
 
-- 优先直接读取 `skills/paper-trading-ashare-etf/state/account_config.json`
-- 这份文件里已经写入一个可用的测试模拟盘账户
-- 只有当用户明确要求切换账户时，才改用新的 `user_token` / `account_id`
+- 优先读取环境变量中的凭证
+- 若环境变量未设置，再读取 `skills/paper-trading-ashare-etf/state/account_config.json`
+- 仓库内的 `account_config.json` 为模板文件，默认不含真实凭证
 
 不要在代码里写死真实凭证。
 

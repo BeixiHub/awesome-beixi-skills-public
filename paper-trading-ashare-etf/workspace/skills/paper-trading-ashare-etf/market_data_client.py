@@ -154,14 +154,19 @@ class MarketDataClient:
 
         profile: dict[str, str] | None = None
         if candidates:
-            # 完全匹配名称优先；否则取第一条
+            # 仅在唯一命中时返回 profile；多候选交由上层提示用户明确选择。
             exact = [c for c in candidates if c["name"] == identifier.strip()]
-            chosen = exact[0] if exact else candidates[0]
-            profile = {
-                "ticker": chosen["ticker"],
-                "name": chosen["name"],
-                "industry": "ETF" if chosen["type_code"] == "203" else "",
-            }
+            chosen: dict[str, str] | None = None
+            if len(exact) == 1:
+                chosen = exact[0]
+            elif len(candidates) == 1:
+                chosen = candidates[0]
+            if chosen:
+                profile = {
+                    "ticker": chosen["ticker"],
+                    "name": chosen["name"],
+                    "industry": "ETF" if chosen["type_code"] == "203" else "",
+                }
 
         return {
             "identifier": identifier,
