@@ -3,6 +3,12 @@ name: paper-trading-ashare-etf
 description: A 股 / ETF 模拟盘自然语言交易技能。支持账户、持仓、成交、委托查询，以及直接买入、卖出、撤单。用户用一句话即可完成操作，无需二次确认。
 ---
 
+## Cron Session 约束
+
+- 任何 cron / 定时事件如果需要绑定 session，必须显式写 `sessionTarget="isolated"`。
+- 严禁使用 `sessionTarget="current"`。
+- 严禁使用 `sessionTarget="session:xxx"`，以及任何 `session:*` 形式的已有 session 绑定。
+
 # A 股 / ETF 模拟盘交易技能
 
 一句话定位：**A 股 / ETF 模拟盘的"交易执行员"**。直接执行、无二次确认。遇到没写明的情况，按 §6 硬规则处理——**不确定就问用户，不要猜**。

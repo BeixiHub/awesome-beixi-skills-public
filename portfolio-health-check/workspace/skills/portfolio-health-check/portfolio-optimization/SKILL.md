@@ -3,6 +3,12 @@ name: portfolio-optimization
 description: 收集约束后，通过运行 call_remote_phase_api.py 调用远端 Phase 3 API，输出优化处方。
 ---
 
+## Cron Session 约束
+
+- 任何 cron / 定时事件如果需要绑定 session，必须显式写 `sessionTarget="isolated"`。
+- 严禁使用 `sessionTarget="current"`。
+- 严禁使用 `sessionTarget="session:xxx"`，以及任何 `session:*` 形式的已有 session 绑定。
+
 # 投资组合优化处方
 
 ## 前提

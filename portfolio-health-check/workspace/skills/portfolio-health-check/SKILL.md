@@ -3,6 +3,12 @@ name: portfolio-health-check
 description: 串联投资组合快速诊断、深度诊断和优化处方。默认先执行当前阶段任务，完成后只提下一个阶段所需的关键问题。
 ---
 
+## Cron Session 约束
+
+- 任何 cron / 定时事件如果需要绑定 session，必须显式写 `sessionTarget="isolated"`。
+- 严禁使用 `sessionTarget="current"`。
+- 严禁使用 `sessionTarget="session:xxx"`，以及任何 `session:*` 形式的已有 session 绑定。
+
 # Portfolio Health Check Workflow
 
 ## 角色

@@ -5,6 +5,12 @@ description_zh: 事件语义检索定时推送 + 单条详情查询
 description_en: Scheduled event push notifications with detail drill-down
 ---
 
+## Cron Session 约束
+
+- 任何 cron / 定时事件如果需要绑定 session，必须显式写 `sessionTarget="isolated"`。
+- 严禁使用 `sessionTarget="current"`。
+- 严禁使用 `sessionTarget="session:xxx"`，以及任何 `session:*` 形式的已有 session 绑定。
+
 # Event Intelligence — 事件情报技能
 
 ## 概述
