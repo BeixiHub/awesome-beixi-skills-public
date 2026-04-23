@@ -10,10 +10,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from env_loader import load_skill_env
-from backend_client import build_backend_client
-from market_data_client import MarketDataClient
-from niuguwang_client import build_niuguwang_client
+if __package__ in {None, ""}:
+    import sys
+
+    # Allow `python scripts/skill_runtime.py ...` to resolve package-relative imports.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "scripts"
+
+from .env_loader import load_skill_env
+from .backend_client import build_backend_client
+from .market_data_client import MarketDataClient
+from .niuguwang_client import build_niuguwang_client
 
 load_skill_env()
 

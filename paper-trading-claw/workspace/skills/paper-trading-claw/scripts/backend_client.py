@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-from env_loader import load_skill_env
+from .env_loader import load_skill_env
 
 
 @dataclass

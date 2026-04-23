@@ -1,37 +1,37 @@
 # paper-trading-claw (OpenClaw Skill)
 
-This demo packages the `paper-trading-claw` skill into the `arkClawDemo` workspace format.
+本项目将 `paper-trading-claw` skill 打包为 `arkClawDemo` workspace 格式。
 
-It is an A-share / ETF paper-trading execution skill for:
-- simulated account registration
-- account / holdings / deals / delegates queries
-- quote and symbol resolution
-- buy / sell / cancel operations
+这是一个 A 股 / ETF 模拟盘交易执行 skill，支持：
+- 模拟账户注册
+- 账户 / 持仓 / 成交 / 委托查询
+- 行情查询与股票代码解析
+- 买入 / 卖出 / 撤单操作
 
-The implementation lives in [workspace/skills/paper-trading-claw](C:/Users/hanji/Downloads/Beixi/arkClawDemo/paper-trading-claw/workspace/skills/paper-trading-claw).
+核心实现在 [workspace/skills/paper-trading-claw](workspace/skills/paper-trading-claw) 目录下。
 
-## Workspace layout
+## 目录结构
 
-- `workspace/AGENTS.md`: routing and workspace rules
-- `workspace/SOUL.md`: assistant role and response style
-- `workspace/TOOLS.md`: runtime configuration notes
-- `workspace/routing-rules.json`: trigger -> skill mapping
-- `workspace/skills/paper-trading-claw/SKILL.md`: primary skill spec
-- `workspace/skills/paper-trading-claw/trading_service.py`: OpenClaw-friendly CLI entry
-- `workspace/skills/paper-trading-claw/scripts/`: runtime modules
-- `workspace/skills/paper-trading-claw/references/`: supporting docs
-- `workspace/skills/paper-trading-claw/state/`: local runtime state templates
+- `workspace/AGENTS.md`：路由与 workspace 规则
+- `workspace/SOUL.md`：助手角色与回复风格
+- `workspace/TOOLS.md`：运行时配置说明
+- `workspace/routing-rules.json`：触发词 -> skill 映射
+- `workspace/skills/paper-trading-claw/SKILL.md`：主 skill 规格说明
+- `workspace/skills/paper-trading-claw/trading_service.py`：CLI 入口
+- `workspace/skills/paper-trading-claw/scripts/`：运行时模块
+- `workspace/skills/paper-trading-claw/references/`：参考文档
+- `workspace/skills/paper-trading-claw/state/`：本地运行时状态
 
-## OpenClaw invocation
+## 调用方式
 
-Run commands inside the skill directory:
+在 skill 目录下运行命令：
 
-```powershell
-cd .\workspace\skills\paper-trading-claw
-python .\trading_service.py <command> ...
+```bash
+cd workspace/skills/paper-trading-claw
+python trading_service.py <command> ...
 ```
 
-Examples:
+示例：
 
 ```bash
 python trading_service.py doctor
@@ -45,11 +45,11 @@ python trading_service.py buy "600519" 100
 python trading_service.py cancel 95449276
 ```
 
-## Configuration
+## 配置
 
-Direct local mode works with built-in defaults and usually does not require any local secret file.
+本地直连模式使用内置默认值，通常不需要额外配置密钥文件。
 
-Optional environment variables:
+可选环境变量：
 
 - `PAPER_TRADING_NGW_BASE_URL`
 - `PAPER_TRADING_NGW_AES_KEY`
@@ -58,11 +58,11 @@ Optional environment variables:
 - `PAPER_TRADING_BACKEND_BASE_URL`
 - `PAPER_TRADING_BACKEND_SECRET`
 
-Use `.env.example` as the template only. Do not commit a real `.env`.
+以 `.env.example` 为模板，不要提交真实的 `.env` 文件。
 
-## Release hygiene
+## 发布注意事项
 
-- keep `state/binding_state.json` empty before publishing
-- keep `state/inner_code_cache.json` empty before publishing
-- do not commit `.env`
-- do not commit local runtime logs or caches
+- 发布前清空 `state/binding_state.json`
+- 发布前清空 `state/inner_code_cache.json`
+- 不要提交 `.env`
+- 不要提交本地运行日志或缓存

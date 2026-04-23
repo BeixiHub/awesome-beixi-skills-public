@@ -10,7 +10,7 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
-from env_loader import load_skill_env
+from .env_loader import load_skill_env
 
 
 DEFAULT_HEADERS = {
