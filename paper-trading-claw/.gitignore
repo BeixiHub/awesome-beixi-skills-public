@@ -1,0 +1,8 @@
+# Python caches
+**/__pycache__/
+*.py[cod]
+
+# Local runtime state
+workspace/skills/paper-trading-claw/state/binding_state.json
+workspace/skills/paper-trading-claw/state/inner_code_cache.json
+workspace/skills/paper-trading-claw/.env
