@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ipaddress
 import json
 import os
+import re
+import socket
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from date_utils import shift_months, shift_years, format_ymd
@@ -85,7 +90,38 @@ class QVerisClient:
     def lookup_security_profile(
         self, identifier: str, limit: int = 5, session_id: str = ""
     ) -> Dict[str, Any]:
-        # 单次搜索覆盖代码转换、公司信息和行业分类。
+        # 优先走直接识别链路；识别失败时再回退到搜索驱动模式。
+        try:
+            identified = self.identify_security(identifier, session_id=session_id)
+            if identified.get("code_lookup", {}).get("resolved"):
+                profile = self._profile_from_identification(identified)
+                result = {
+                    "identifier": identifier,
+                    "profile": profile,
+                    "tools_found": [],
+                    "code_lookup": identified.get("code_lookup", {}),
+                    "asset_type": identified.get("asset_type", ""),
+                    "company": identified.get("company"),
+                    "industry": identified.get("industry"),
+                }
+                if identified.get("industry_note"):
+                    result["industry_note"] = identified["industry_note"]
+                return result
+        except Exception as exc:
+            print(
+                f"[qveris] direct identification failed for {identifier!r}: {exc}",
+                file=sys.stderr,
+            )
+
+        return self._lookup_security_profile_via_search(
+            identifier,
+            limit=limit,
+            session_id=session_id,
+        )
+
+    def _lookup_security_profile_via_search(
+        self, identifier: str, limit: int = 5, session_id: str = ""
+    ) -> Dict[str, Any]:
         query = f"stock code company profile industry {identifier}"
         search_result = self.search_tools(query, limit=limit, session_id=session_id)
 
@@ -99,14 +135,13 @@ class QVerisClient:
                 }
             )
 
-        # Try to auto-run company info tool for actual data
         profile_data = None
         search_id = search_result.get("search_id", "")
-        _CANDIDATE_TOOLS = [
+        candidate_tools = [
             ("mcp_gildata.companybasicinfo.v1", {"query": identifier}),
             ("ths_ifind.company_basics.v1", {"codes": identifier}),
         ]
-        for target_tool_id, params in _CANDIDATE_TOOLS:
+        for target_tool_id, params in candidate_tools:
             if profile_data is not None:
                 break
             matched = any(
@@ -124,7 +159,7 @@ class QVerisClient:
                 )
                 profile_data = self._extract_profile_from_result(run_result)
             except Exception:
-                pass  # Try next candidate or fallback
+                pass
 
         return {
             "identifier": identifier,
@@ -216,6 +251,345 @@ class QVerisClient:
             pass
         return None
 
+    _FULL_CODE_PATTERN = re.compile(r"^(\d{6})\.([A-Z]{2})$")
+    _BARE_CODE_PATTERN = re.compile(r"^\d{6}$")
+    _ETF_SUFFIXES = re.compile(r"(ETF|LOF)$", re.IGNORECASE)
+    _FUND_PREFIXES = ("基金", "货币", "债券型", "混合型", "指数型")
+
+    TOOL_CODE_CONVERTER = "ths_ifind.code_converter.v1"
+    TOOL_COMPANY_BASICS = "ths_ifind.company_basics.v1"
+    TOOL_INDUSTRY = "mcp_gildata.stockbelongindustry.v1"
+    TOOL_REALTIME_QUOTE = "ths_ifind.real_time_quotation.v1"
+
+    def _parse_identifier_type(self, identifier: str) -> str:
+        value = identifier.strip()
+        if self._FULL_CODE_PATTERN.match(value):
+            return "full_code"
+        if self._BARE_CODE_PATTERN.match(value):
+            return "bare_code"
+        return "name"
+
+    def _resolve_code(
+        self, identifier: str, session_id: str = ""
+    ) -> Dict[str, Any]:
+        identifier = identifier.strip()
+        id_type = self._parse_identifier_type(identifier)
+
+        if id_type == "full_code":
+            return {
+                "success": True,
+                "result": {
+                    "data": [{"table": {"thscode": [identifier]}}],
+                    "metadata": {"mode": "direct", "has_results": True},
+                },
+            }
+
+        if id_type == "bare_code":
+            return self.execute_tool(
+                self.TOOL_CODE_CONVERTER,
+                "",
+                {"seccode": identifier, "mode": "seccode", "isexact": "0"},
+                session_id=session_id,
+            )
+
+        result = self.execute_tool(
+            self.TOOL_CODE_CONVERTER,
+            "",
+            {"secname": identifier, "mode": "secname", "isexact": "1"},
+            session_id=session_id,
+        )
+        if not result.get("success"):
+            result = self.execute_tool(
+                self.TOOL_CODE_CONVERTER,
+                "",
+                {"secname": identifier, "mode": "secname", "isexact": "0"},
+                session_id=session_id,
+            )
+        return result
+
+    def _parse_code_converter(
+        self, raw: Dict[str, Any], identifier: str
+    ) -> Dict[str, Any]:
+        if not raw.get("success"):
+            return {
+                "resolved": False,
+                "error": raw.get("error_message", "unknown error"),
+            }
+
+        data = raw.get("result", {}).get("data")
+        if not data:
+            return {"resolved": False, "error": "empty response"}
+
+        entry = data[0] if isinstance(data, list) else data
+        codes_raw = entry.get("table", {}).get("thscode", [])
+        codes: List[str] = []
+        for item in codes_raw:
+            codes.extend([code.strip() for code in item.split(",") if code.strip()])
+
+        if not codes:
+            return {
+                "resolved": False,
+                "error": f"No codes found for identifier: {identifier}",
+                "input": identifier,
+                "codes": [],
+            }
+
+        return {
+            "resolved": True,
+            "input": identifier,
+            "codes": codes,
+            "is_ambiguous": len(codes) > 1,
+        }
+
+    def _fetch_company_basics(
+        self, ths_code: str, session_id: str = ""
+    ) -> Dict[str, Any]:
+        return self.execute_tool(
+            self.TOOL_COMPANY_BASICS,
+            "",
+            {"codes": ths_code},
+            session_id=session_id,
+        )
+
+    def _parse_company_basics(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not raw.get("success"):
+            return None
+        data = raw.get("result", {}).get("data")
+        if not data:
+            return None
+        rows = data[0] if isinstance(data, list) and data else data
+        if isinstance(rows, list) and rows:
+            row = rows[0]
+        elif isinstance(rows, dict):
+            row = rows
+        else:
+            return None
+        return {
+            "ths_code": row.get("ths_thscode_stock") or row.get("thscode", ""),
+            "stock_code": row.get("ths_stock_code_stock", ""),
+            "company_name": row.get("ths_corp_cn_name_stock", ""),
+            "main_business": row.get("ths_main_businuess_stock", ""),
+            "products": row.get("ths_mo_product_name_stock", ""),
+            "concepts": row.get("ths_the_ths_concept_index_stock", ""),
+            "established_date": row.get("ths_established_date_stock", ""),
+        }
+
+    def _fetch_industry(self, name: str, session_id: str = "") -> Dict[str, Any]:
+        return self.execute_tool(
+            self.TOOL_INDUSTRY,
+            "",
+            {"query": f"{name}的所属申万行业"},
+            session_id=session_id,
+        )
+
+    def _parse_industry(
+        self, raw: Dict[str, Any]
+    ) -> Optional[List[Dict[str, str]]]:
+        if not raw.get("success"):
+            return None
+        results = raw.get("result", {}).get("data", {}).get("results", [])
+        if not results:
+            return None
+        entry = results[0] if isinstance(results[0], dict) else {}
+        origin_data = entry.get("origin_data")
+        if not isinstance(origin_data, dict):
+            return None
+        rows = origin_data.get("rows", [])
+        if not rows:
+            return None
+        return [
+            {
+                "level": row.get("classification", ""),
+                "name": row.get("industryName", ""),
+                "code": row.get("industryCode", ""),
+                "standard": row.get("standard", ""),
+            }
+            for row in rows
+        ]
+
+    def _looks_like_fund(self, identifier: str, ths_code: str = "") -> bool:
+        if self._ETF_SUFFIXES.search(identifier):
+            return True
+        if any(identifier.startswith(prefix) for prefix in self._FUND_PREFIXES):
+            return True
+        if ths_code and ths_code.endswith((".OF", ".SZ", ".SH")):
+            bare = ths_code.split(".")[0]
+            if bare.startswith("1") and len(bare) == 6:
+                return True
+        return False
+
+    def _profile_from_identification(
+        self, result: Dict[str, Any]
+    ) -> Optional[Dict[str, str]]:
+        company = result.get("company") or {}
+        industry_rows = result.get("industry") or []
+        industry = ""
+        if industry_rows:
+            industry = industry_rows[-1].get("name", "")
+        elif result.get("industry_note"):
+            industry = result["industry_note"]
+
+        ticker = (
+            company.get("ths_code")
+            or result.get("primary_code", "")
+            or result.get("code_lookup", {}).get("codes", [""])[0]
+        )
+        name = company.get("company_name", "")
+        if not (ticker or name or industry):
+            return None
+        return {"ticker": ticker, "name": name, "industry": industry}
+
+    def identify_security(
+        self, identifier: str, session_id: str = ""
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"identifier": identifier}
+
+        code_raw = self._resolve_code(identifier, session_id)
+        code_info = self._parse_code_converter(code_raw, identifier)
+        result["code_lookup"] = code_info
+
+        if not code_info.get("resolved"):
+            result["company"] = None
+            result["industry"] = None
+            return result
+
+        primary_code = code_info["codes"][0]
+        result["primary_code"] = primary_code
+
+        basics_raw = self._fetch_company_basics(primary_code, session_id)
+        result["company"] = self._parse_company_basics(basics_raw)
+
+        is_fund = self._looks_like_fund(identifier, primary_code)
+        result["asset_type"] = "fund_or_etf" if is_fund else "stock"
+
+        if is_fund:
+            result["industry"] = None
+            result["industry_note"] = "ETF/基金类标的不适用个股行业分类"
+            return result
+
+        query_name = identifier
+        company = result.get("company") or {}
+        if company.get("company_name"):
+            short_name = (
+                company["company_name"]
+                .replace("股份有限公司", "")
+                .replace("有限公司", "")
+            )
+            query_name = short_name if len(short_name) >= 2 else identifier
+        elif self._parse_identifier_type(identifier) != "name":
+            query_name = primary_code
+
+        industry_raw = self._fetch_industry(query_name, session_id)
+        result["industry"] = self._parse_industry(industry_raw)
+        return result
+
+    def fetch_realtime_quotes(
+        self, codes: Iterable[str], session_id: str = ""
+    ) -> Dict[str, Any]:
+        code_list = [str(code).strip() for code in codes if str(code).strip()]
+        raw = self.execute_tool(
+            self.TOOL_REALTIME_QUOTE,
+            "",
+            {"codes": ",".join(code_list), "indicators": "latest,preClose"},
+            session_id=session_id,
+        )
+
+        quotes: Dict[str, Any] = {}
+        if not raw.get("success"):
+            return {
+                "success": False,
+                "error": raw.get("error_message", "unknown"),
+                "quotes": quotes,
+            }
+
+        for series in raw.get("result", {}).get("data", []):
+            if not isinstance(series, list) or not series:
+                continue
+            entry = series[0]
+            code = entry.get("thscode", "")
+            quotes[code] = {
+                "code": code,
+                "latest_price": entry.get("最新价"),
+                "pre_close": entry.get("前收盘价"),
+                "time": entry.get("time", ""),
+            }
+
+        return {"success": True, "quotes": quotes}
+
+    def compute_portfolio_weights(
+        self,
+        holdings: List[Dict[str, Any]],
+        cash: float = 0.0,
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        codes = [holding["code"] for holding in holdings if holding.get("code")]
+        if not codes:
+            return {"success": False, "error": "no valid codes provided"}
+
+        quote_result = self.fetch_realtime_quotes(codes, session_id=session_id)
+        if not quote_result.get("success"):
+            return quote_result
+
+        quotes = quote_result["quotes"]
+        enriched = []
+        total_equity_value = 0.0
+        for holding in holdings:
+            code = holding.get("code", "")
+            shares = holding.get("shares", 0)
+            quote = quotes.get(code)
+            if quote and quote.get("latest_price") is not None:
+                price = float(quote["latest_price"])
+                market_value = price * shares
+            else:
+                price = None
+                market_value = None
+
+            row = {
+                "name": holding.get("name", ""),
+                "code": code,
+                "shares": shares,
+                "latest_price": price,
+                "market_value": market_value,
+            }
+            enriched.append(row)
+            if market_value is not None:
+                total_equity_value += market_value
+
+        total_value = total_equity_value + cash
+        for row in enriched:
+            if row["market_value"] is not None and total_value > 0:
+                row["weight_pct"] = round(row["market_value"] / total_value * 100, 2)
+            else:
+                row["weight_pct"] = None
+
+        quote_missing_count = sum(
+            1 for row in enriched if row["market_value"] is None
+        )
+        all_quotes_missing = bool(enriched) and quote_missing_count == len(enriched)
+
+        result = {
+            "success": not (all_quotes_missing and cash == 0),
+            "holdings": enriched,
+            "cash": {
+                "amount": cash,
+                "weight_pct": round(cash / total_value * 100, 2)
+                if total_value > 0
+                else None,
+            },
+            "total_equity_value": round(total_equity_value, 2),
+            "total_value": round(total_value, 2),
+            "quote_time": next(
+                (quote["time"] for quote in quotes.values() if quote.get("time")),
+                "",
+            ),
+        }
+        if all_quotes_missing:
+            result["warning"] = "realtime quotes missing for all holdings"
+            if cash == 0:
+                result["error"] = "unable to compute weights because all realtime quotes are missing"
+
+        return result
+
     def build_market_data_plan(self, rebalance_frequency: str) -> Dict[str, Any]:
         plans = {
             "intraday": {
@@ -258,7 +632,7 @@ class QVerisClient:
     ) -> Dict[str, Any]:
         plan = self.build_market_data_plan(rebalance_frequency)
         results = []
-        for query in plan["recommended_queries"]:
+        for query in plan.get("recommended_queries", []):
             try:
                 results.append(
                     self.search_tools(query, limit=limit, session_id=session_id)
@@ -391,7 +765,7 @@ class QVerisClient:
                 "D",
                 "日线数据，回溯2年",
             ),
-            "weekly_3y": self._build_ths_historySpec(
+            "weekly_3y": self._build_ths_history_spec(
                 "weekly_3y",
                 codes,
                 self._format_ymd(three_year_start),
@@ -547,18 +921,134 @@ class QVerisClient:
         url = f"{self.config.base_url}/tools/execute?tool_id={tool_id}"
         return self._post_json(url, payload)
 
-    def _flatten_result_rows(self, raw: Dict[str, Any]) -> list[Dict[str, Any]]:
-        result = raw.get("result", {})
-        data = result.get("data", {})
+    def _download_full_content(self, payload: Dict[str, Any]) -> Optional[Any]:
+        result = payload.get("result", payload)
+        if not isinstance(result, dict):
+            return None
+
+        full_url = result.get("full_content_file_url")
+        if not full_url:
+            return None
+        if not self._is_safe_full_content_url(full_url):
+            print(
+                f"[qveris] WARNING: rejected unsafe full_content_file_url: {full_url}",
+                file=sys.stderr,
+            )
+            return None
+
+        last_error: Optional[Exception] = None
+        timeout = max(self.config.timeout, 120)
+        for attempt in range(3):
+            try:
+                raw = urlopen(full_url, timeout=timeout).read().decode("utf-8")
+                return json.loads(raw)
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(attempt + 1)
+
+        print(
+            f"[qveris] WARNING: failed to download full content after 3 attempts: {last_error}",
+            file=sys.stderr,
+        )
+        print(f"[qveris] full_content_file_url: {full_url}", file=sys.stderr)
+
+        truncated = result.get("truncated_content")
+        if isinstance(truncated, str) and truncated:
+            try:
+                return json.loads(truncated)
+            except ValueError as exc:
+                print(
+                    f"[qveris] WARNING: failed to parse truncated_content fallback: {exc}",
+                    file=sys.stderr,
+                )
+                return None
+        return None
+
+    @staticmethod
+    def _is_safe_resolved(hostname: str) -> bool:
+        """Resolve hostname via DNS and reject private/loopback/reserved IPs.
+
+        Prevents DNS rebinding: a hostname that passed the parse-time check
+        could resolve to 127.0.0.1 at connect time if the attacker controls
+        DNS with TTL=0.
+        """
+        try:
+            results = socket.getaddrinfo(hostname, None)
+            if not results:
+                return False
+            for family, _, _, _, addr in results:
+                ip = ipaddress.ip_address(addr[0])
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_reserved
+                    or ip.is_link_local
+                    or ip.is_multicast
+                    or ip.is_unspecified
+                ):
+                    return False
+        except socket.gaierror:
+            return False
+        return True
+
+    def _is_safe_full_content_url(self, full_url: str) -> bool:
+        parsed = urlparse(full_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return False
+        if parsed.username or parsed.password:
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        normalized = hostname.lower()
+        if normalized == "localhost" or normalized.endswith(".local"):
+            return False
+
+        try:
+            address = ipaddress.ip_address(normalized)
+        except ValueError:
+            # hostname is a domain name, not an IP literal — resolve it
+            return self._is_safe_resolved(normalized)
+
+        if (
+            address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_private
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            return False
+        return True
+
+    def resolve_full_content(self, payload: Dict[str, Any]) -> Optional[Any]:
+        return self._download_full_content(payload)
+
+    def _flatten_result_rows(self, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+        result = raw.get("result", raw)
+        data = result.get("data", []) if isinstance(result, dict) else []
+        if not data:
+            full_content = self._download_full_content(raw)
+            if isinstance(full_content, list):
+                data = full_content
+
+        rows: List[Dict[str, Any]] = []
         if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
+            for item in data:
+                if isinstance(item, dict):
+                    rows.append(item)
+                elif isinstance(item, list):
+                    rows.extend(row for row in item if isinstance(row, dict))
+            return rows
+
         if isinstance(data, dict):
             if isinstance(data.get("rows"), list):
                 return [row for row in data["rows"] if isinstance(row, dict)]
-            if all(isinstance(v, list) for v in data.values()) and data:
+            if all(isinstance(value, list) for value in data.values()) and data:
                 keys = list(data.keys())
-                row_count = max(len(v) for v in data.values())
-                rows = []
+                row_count = max(len(value) for value in data.values())
                 for idx in range(row_count):
                     rows.append(
                         {
@@ -566,8 +1056,86 @@ class QVerisClient:
                             for key in keys
                         }
                     )
-                return rows
+        return rows
+
+    def _normalize_ths_series(self, series: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        if not isinstance(series, list):
+            return normalized
+
+        for row in series:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(
+                {
+                    "code": row.get("thscode")
+                    or row.get("security_code")
+                    or row.get("code"),
+                    "time": row.get("time") or row.get("date"),
+                    "close": row.get("close") or row.get("收盘价"),
+                    "volume": row.get("volume") or row.get("成交量"),
+                }
+            )
+        return normalized
+
+    def _extract_ths_series(self, payload: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
+        result = payload.get("result", payload)
+        data = result.get("data", []) if isinstance(result, dict) else []
+        if not data:
+            full_content = self._download_full_content(payload)
+            if isinstance(full_content, list):
+                data = full_content
+
+        if not isinstance(data, list):
+            return []
+        if data and isinstance(data[0], dict):
+            return [data]
+        if data and isinstance(data[0], list):
+            return [series for series in data if isinstance(series, list)]
         return []
+
+    def _split_series_by_code(
+        self, series_list: List[List[Dict[str, Any]]]
+    ) -> List[List[Dict[str, Any]]]:
+        result: List[List[Dict[str, Any]]] = []
+        for series in series_list:
+            codes_in_series = {
+                row.get("code", "") for row in series if isinstance(row, dict)
+            }
+            if len(codes_in_series) <= 1:
+                result.append(series)
+                continue
+
+            by_code: Dict[str, List[Dict[str, Any]]] = {}
+            for row in series:
+                code = row.get("code", "")
+                by_code.setdefault(code, []).append(row)
+            result.extend(by_code.values())
+        return result
+
+    def _summarize_series(self, series: List[Dict[str, Any]]) -> Dict[str, Any]:
+        closes = [
+            row["close"]
+            for row in series
+            if isinstance(row.get("close"), (int, float))
+        ]
+        volumes = [
+            row["volume"]
+            for row in series
+            if isinstance(row.get("volume"), (int, float))
+        ]
+        return {
+            "start": series[0]["time"] if series else "",
+            "end": series[-1]["time"] if series else "",
+            "rows": len(series),
+            "first_close": closes[0] if closes else None,
+            "last_close": closes[-1] if closes else None,
+            "min_close": min(closes) if closes else None,
+            "max_close": max(closes) if closes else None,
+            "min_volume": min(volumes) if volumes else None,
+            "max_volume": max(volumes) if volumes else None,
+            "last_volume": volumes[-1] if volumes else None,
+        }
 
     def load_state(self) -> Dict[str, Any]:
         path = Path(self.config.state_file)
@@ -634,42 +1202,68 @@ class QVerisClient:
         executions = []
         manifest = []
         for spec in dataset_specs:
-            tool_search = self.search_tools(
-                spec["query"],
-                limit=limit,
-                session_id=session_id,
-            )
-            search_id = tool_search.get("search_id", "")
-            matched_tool = next(
-                (
-                    tool
-                    for tool in tool_search.get("results", [])
-                    if tool.get("tool_id") == spec["tool_id"]
-                ),
-                None,
-            )
-            if not (matched_tool and search_id):
+            try:
+                execution = self.execute_tool(
+                    tool_id=spec["tool_id"],
+                    search_id="",
+                    parameters=spec["parameters"],
+                    session_id=session_id,
+                )
+            except Exception as exc:
                 executions.append(
                     {
                         "dataset_id": spec["dataset_id"],
                         "status": "error",
-                        "error": f"Tool {spec['tool_id']} not found in QVeris search",
-                        "tool_search": tool_search,
+                        "tool_id": spec["tool_id"],
+                        "error": str(exc),
                     }
                 )
                 continue
 
-            execution = self.execute_tool(
-                tool_id=spec["tool_id"],
-                search_id=search_id,
-                parameters=spec["parameters"],
-                session_id=session_id,
+            if not execution.get("success", True):
+                error_message = execution.get("error_message") or execution.get("error") or "tool execution failed"
+                executions.append(
+                    {
+                        "dataset_id": spec["dataset_id"],
+                        "status": "error",
+                        "tool_id": spec["tool_id"],
+                        "error": error_message,
+                    }
+                )
+                continue
+
+            full_content = self._download_full_content(execution)
+            has_full_url = bool(
+                isinstance(execution.get("result"), dict)
+                and execution["result"].get("full_content_file_url")
             )
+            if full_content is not None and isinstance(execution.get("result"), dict):
+                execution["result"]["resolved_full_content"] = full_content
+                if isinstance(full_content, list):
+                    execution["result"]["data"] = full_content
+
+            series_list = self._extract_ths_series(execution)
+            normalized_series = [
+                self._normalize_ths_series(series) for series in series_list
+            ]
+            normalized_series = self._split_series_by_code(normalized_series)
+            summaries = [
+                self._summarize_series(series) for series in normalized_series
+            ]
+
             output_path = self._artifact_output_path(spec["dataset_id"])
+            artifact_payload = {
+                "format": self.ARTIFACT_FORMAT,
+                "spec": spec,
+                "raw_result": execution,
+                "rows": normalized_series,
+                "summaries": summaries,
+            }
             output_path.write_text(
-                json.dumps(execution, ensure_ascii=False, indent=2) + "\n",
+                json.dumps(artifact_payload, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+
             manifest_entry = {
                 "dataset_id": spec["dataset_id"],
                 "tool_id": spec["tool_id"],
@@ -685,7 +1279,10 @@ class QVerisClient:
                     "status": "ok",
                     "path": str(output_path),
                     "tool_id": spec["tool_id"],
-                    "tool_search": tool_search,
+                    "series_count": len(normalized_series),
+                    "summaries": summaries,
+                    "full_content_resolved": has_full_url
+                    and full_content is not None,
                 }
             )
 
@@ -721,9 +1318,31 @@ class QVerisClient:
         rows: list[dict[str, Any]] = []
         for path in source_paths:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            series_rows = payload.get("rows")
+            if isinstance(series_rows, list):
+                for series in series_rows:
+                    if not isinstance(series, list):
+                        continue
+                    is_hf = (
+                        "minute" in path.name
+                        or payload.get("spec", {}).get("tool_kind") == "minute"
+                    )
+                    time_key = "datetime" if is_hf else "date"
+                    for item in series:
+                        if not isinstance(item, dict):
+                            continue
+                        rows.append(
+                            {
+                                "code": item.get("code", ""),
+                                time_key: item.get("time", ""),
+                                "close": item.get("close", ""),
+                                "volume": item.get("volume", ""),
+                            }
+                        )
+                continue
+
             flat_rows = self._flatten_result_rows(payload)
-            for item in flat_rows:
-                rows.append(item)
+            rows.extend(item for item in flat_rows if isinstance(item, dict))
 
         fieldnames = sorted({key for row in rows for key in row.keys()})
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -761,6 +1380,17 @@ def main() -> None:
     )
     lookup_parser.add_argument("--limit", type=int, default=5)
     lookup_parser.add_argument("--session-id", default="")
+
+    quote_parser = subparsers.add_parser(
+        "quote", help="Fetch real-time prices; with shares compute portfolio weights"
+    )
+    quote_parser.add_argument(
+        "holdings",
+        nargs="+",
+        help="NAME=CODE:SHARES (e.g. 贵州茅台=600519.SH:100) or just codes",
+    )
+    quote_parser.add_argument("--cash", type=float, default=0.0)
+    quote_parser.add_argument("--session-id", default="")
 
     market_parser = subparsers.add_parser(
         "market-plan", help="Build market data plan by rebalance frequency"
@@ -852,6 +1482,46 @@ def main() -> None:
         _print_json(results if len(results) > 1 else results[0])
         return
 
+    if args.command == "quote":
+        has_shares = any(":" in holding for holding in args.holdings)
+        if has_shares:
+            holdings = []
+            for holding in args.holdings:
+                name_part, _, code_shares = holding.partition("=")
+                if not code_shares:
+                    code_shares = name_part
+                    name_part = ""
+                parts = code_shares.split(":", 1)
+                code = parts[0].strip()
+                try:
+                    shares = float(parts[1]) if len(parts) > 1 else 0
+                except ValueError:
+                    invalid_value = parts[1] if len(parts) > 1 else ""
+                    print(
+                        f"[qveris] WARNING: invalid shares value '{invalid_value}' for code '{code}', defaulting to 0",
+                        file=sys.stderr,
+                    )
+                    shares = 0
+                holdings.append(
+                    {
+                        "code": code,
+                        "shares": shares,
+                        "name": name_part.strip() or code,
+                    }
+                )
+            result = client.compute_portfolio_weights(
+                holdings,
+                cash=args.cash,
+                session_id=args.session_id,
+            )
+        else:
+            result = client.fetch_realtime_quotes(
+                args.holdings,
+                session_id=args.session_id,
+            )
+        _print_json(result)
+        return
+
     if args.command == "market-plan":
         result = client.build_market_data_plan(args.rebalance_frequency)
         _print_json(result)
@@ -911,6 +1581,11 @@ def main() -> None:
             session_id=args.session_id,
             max_response_size=args.max_response_size,
         )
+        full_content = client.resolve_full_content(result)
+        if full_content is not None and isinstance(result.get("result"), dict):
+            result["result"]["data"] = full_content
+            result["result"].pop("truncated_content", None)
+            result["result"].pop("full_content_file_url", None)
         _print_json(result)
         return
 

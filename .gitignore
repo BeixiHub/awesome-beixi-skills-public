@@ -1,3 +1,5 @@
 .DS_Store
+__pycache__/
+*.pyc
 **/state/inner_code_cache.json
 **/state/trade_audit_log.jsonl

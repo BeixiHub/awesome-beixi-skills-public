@@ -1,6 +1,6 @@
 # Portfolio Health Check — RESTful API 接口规范
 
-> 版本: v1.2 | 日期: 2026-04-14 | BeixiAI
+> 版本: v1.3 | 日期: 2026-04-20 | BeixiAI
 
 本文档定义持仓健康检查三个阶段的接口规范。Phase 2 与 Phase 3 通过远端 RESTful JSON 接口提供，Phase 1 由 Skill 本地驱动，无独立远端接口。
 
@@ -55,13 +55,18 @@
 
 ### 认证
 
-所有接口支持可选的 Bearer Token 认证：
+所有远端接口统一走 ReportServer Java 网关，并要求携带以下请求头：
 
-```
-Authorization: Bearer <token>
+```http
+X-API-Key: <api_key>
+tenant-id: <tenant_id>
 ```
 
-当前默认部署无需认证。如果服务端启用认证，则需在请求头中携带 token。
+说明：
+
+- 不再使用 `Authorization: Bearer <token>`
+- 默认网关地址为 `https://admin.deepseekdata.com`
+- 默认公开租户为 `tenant-id: 1`
 
 ---
 
@@ -73,14 +78,23 @@ Skill 通过 `call_remote_phase_api.py` 脚本统一调用 Phase 2 / Phase 3 远
 
 | phase 值 | 对应端点 | 返回格式 |
 |----------|---------|---------|
-| `phase2` | `POST /api/v1/phase-2/deep-diagnosis` | JSON |
-| `phase2_pdf` | `POST /api/v1/phase-2/deep-diagnosis/pdf` | PDF（`application/pdf`） |
-| `phase3` | `POST /api/v1/phase-3/optimization` | JSON |
+| `phase2` | `POST /admin-api/aireport2/portfolio-health/phase-2/deep-diagnosis` | JSON |
+| `phase2_pdf` | `POST /admin-api/aireport2/portfolio-health/phase-2/deep-diagnosis/pdf` | PDF（`application/pdf`） |
+| `phase3` | `POST /admin-api/aireport2/portfolio-health/phase-3/optimization` | JSON |
+
+### `call_remote_phase_api.py` 内部执行模型
+
+- 当服务端支持时，脚本优先使用异步任务端点：
+  - `POST /admin-api/aireport2/portfolio-health/phc-tasks` 提交任务
+  - `GET /admin-api/aireport2/portfolio-health/phc-tasks/{task_id}` 轮询结果
+- 对调用方暴露的 CLI 仍然只有 `phase2` / `phase2_pdf` / `phase3` 三个 phase，接口签名不变
+- 只有当 `/phc-tasks` 端点不存在、方法不允许、未实现，或 submit 阶段发生网络错误时，才自动回退到原同步端点
+- 如果异步 poll 阶段返回 4xx/5xx，客户端会直接报错，不会静默回退到同步调用
 
 ### 命令行用法
 
 ```bash
-python call_remote_phase_api.py <phase> <payload_file> [--output <path>] [--base-url <url>] [--token <token>]
+python call_remote_phase_api.py <phase> <payload_file> [--output <path>] [--base-url <url>] [--api-key <key>] [--tenant-id <id>]
 ```
 
 | 参数 | 说明 |
@@ -88,33 +102,41 @@ python call_remote_phase_api.py <phase> <payload_file> [--output <path>] [--base
 | `phase` | `phase2` \| `phase2_pdf` \| `phase3` |
 | `payload_file` | JSON payload 文件路径 |
 | `--output` | 可选，输出文件路径。`phase2`/`phase3` 写 JSON，`phase2_pdf` 写 PDF 二进制 |
-| `--base-url` | 可选，远端 API 基地址 |
-| `--token` | 可选，Bearer token |
+| `--base-url` | 可选，Java 网关基地址 |
+| `--api-key` | 可选，OpenAPI key；默认读取 `PORTFOLIO_API_KEY` |
+| `--tenant-id` | 可选，多租户 id；默认读取 `PORTFOLIO_API_TENANT_ID` |
 
 ### 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `PORTFOLIO_API_BASE_URL` | 远端 API 基地址 | `http://82.157.41.134:9000` |
-| `PORTFOLIO_API_TOKEN` | Bearer token | 空（不认证） |
+| `PORTFOLIO_API_BASE_URL` | Java 网关基地址 | `https://admin.deepseekdata.com` |
+| `PORTFOLIO_API_KEY` | OpenAPI key | 空（必填） |
+| `PORTFOLIO_API_TENANT_ID` | 多租户 id | `1` |
 
 ### 超时与重试
 
-- 请求超时：**180 秒**
-- 超时自动重试：**最多 2 次**（仅对 `TimeoutError` / `socket.timeout` 重试）
-- HTTP 错误和连接错误**不重试**
+- 主 API 请求按动态公式设置客户端超时：`max(stock_count × 180s, 1800s)`
+- 异步任务模式下，submit 固定使用 30 秒短超时；poll 总超时为上述主超时的 `1.2x`
+- 网络层 `URLError` 自动重试 1 次，并复用同一个 `X-Idempotency-Key`
+- HTTP 错误（4xx/5xx）不重试
+
+说明：
+- `phase2` 和 `phase2_pdf` 在持仓股票较多时，运行 10 分钟甚至更久都可能是正常情况
+- 30 分钟 floor 用来覆盖小组合的固定开销（QVeris 拉取、LLM 舆情、PDF 渲染）
+- 调用方应提前向用户说明这是长耗时步骤
 
 ### 典型调用示例
 
 ```bash
 # Phase 2 — PDF 报告
-python call_remote_phase_api.py phase2_pdf state/phase2_payload.json --output state/phase2_report.pdf
+python call_remote_phase_api.py phase2_pdf state/phase2_payload.json --output state/phase2_report.pdf --api-key "$PORTFOLIO_API_KEY"
 
 # Phase 2 — JSON（PDF 失败时降级，或快捷流程静默调用）
-python call_remote_phase_api.py phase2 state/phase2_payload.json --output state/phase2_result.json
+python call_remote_phase_api.py phase2 state/phase2_payload.json --output state/phase2_result.json --api-key "$PORTFOLIO_API_KEY"
 
 # Phase 3 — 优化处方
-python call_remote_phase_api.py phase3 state/phase3_payload.json --output state/phase3_result.json
+python call_remote_phase_api.py phase3 state/phase3_payload.json --output state/phase3_result.json --api-key "$PORTFOLIO_API_KEY"
 ```
 
 ---
@@ -150,7 +172,7 @@ Phase 1 的核心输出是**持仓确认表**，包含以下结构化数据，�
 
 ## 接口二：深度诊断
 
-`POST /api/v1/phase-2/deep-diagnosis`
+`POST /admin-api/aireport2/portfolio-health/phase-2/deep-diagnosis`
 
 量化技术分析，需收集 4 个核心分析参数；可选补充组合总市值。
 
@@ -289,7 +311,7 @@ Phase 2 成功时，除通用 envelope 外，响应还包含 `client_output`、`
 
 ### PDF 报告端点
 
-`POST /api/v1/phase-2/deep-diagnosis/pdf`
+`POST /admin-api/aireport2/portfolio-health/phase-2/deep-diagnosis/pdf`
 
 - 请求体与 JSON 深度诊断端点完全一致
 - 成功时返回 `application/pdf`，响应头含 `Content-Disposition`
@@ -300,7 +322,7 @@ Phase 2 成功时，除通用 envelope 外，响应还包含 `client_output`、`
 
 ## 接口三：优化处方
 
-`POST /api/v1/phase-3/optimization`
+`POST /admin-api/aireport2/portfolio-health/phase-3/optimization`
 
 基于深度诊断结果 + 客户约束，生成分层优化建议和前后对比。
 
