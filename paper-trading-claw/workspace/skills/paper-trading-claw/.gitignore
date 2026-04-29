@@ -1,6 +1,0 @@
-__pycache__/
-*.pyc
-.env
-.env.local
-state/binding_state.json
-state/inner_code_cache.json
