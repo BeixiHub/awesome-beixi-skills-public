@@ -1,38 +1,38 @@
-# paper-trading-claw-server (OpenClaw Skill)
+# paper-trading-claw-server（OpenClaw Skill）
 
-This demo packages the `paper-trading-claw-server` skill into the `arkClawDemo` workspace format.
+本 demo 将 `paper-trading-claw-server` skill 打包为 `arkClawDemo` 工作区格式。
 
-It is an A-share / ETF paper-trading client skill for:
-- SMS verification and simulated account registration
-- account / holdings / deals / delegates queries
-- quote and stock symbol / innerCode resolution
-- virtual buy / sell operations through the Beixi backend API
+这是一个 A 股 / ETF 模拟交易客户端 skill，支持以下功能：
+- 短信验证与模拟账户注册
+- 账户 / 持仓 / 成交 / 委托查询
+- 行情查询与股票代码 / innerCode 解析
+- 通过蓓曦后端 API 执行虚拟买入 / 卖出操作
 
-Cancel order execution is disabled. Use today's delegates and deals queries to inspect order status.
+撤单功能已禁用。请使用 `delegates-today` 和 `deals-today` 命令查询当日委托和成交状态。
 
-The implementation lives in `workspace/skills/paper-trading-claw-server`.
+实现代码位于 `workspace/skills/paper-trading-claw-server`。
 
-## Workspace layout
+## 工作区目录结构
 
-- `workspace/AGENTS.md`: routing and workspace rules
-- `workspace/SOUL.md`: assistant role and response style
-- `workspace/TOOLS.md`: runtime configuration notes
-- `workspace/routing-rules.json`: trigger -> skill mapping
-- `workspace/skills/paper-trading-claw-server/SKILL.md`: primary skill spec
-- `workspace/skills/paper-trading-claw-server/trading_service.py`: OpenClaw-friendly CLI entry
-- `workspace/skills/paper-trading-claw-server/scripts/`: API client runtime modules
-- `workspace/skills/paper-trading-claw-server/references/`: setup, API, and error handling docs
+- `workspace/AGENTS.md`：路由与工作区规则
+- `workspace/SOUL.md`：助手角色与回复风格
+- `workspace/TOOLS.md`：运行时配置说明
+- `workspace/routing-rules.json`：触发器 -> skill 映射
+- `workspace/skills/paper-trading-claw-server/SKILL.md`：主要 skill 规格说明
+- `workspace/skills/paper-trading-claw-server/trading_service.py`：OpenClaw 兼容的 CLI 入口
+- `workspace/skills/paper-trading-claw-server/scripts/`：API 客户端运行时模块
+- `workspace/skills/paper-trading-claw-server/references/`：环境配置、API 和错误处理文档
 
-## OpenClaw invocation
+## OpenClaw 调用方式
 
-Run commands inside the skill directory:
+在 skill 目录下运行命令：
 
 ```powershell
 cd .\workspace\skills\paper-trading-claw-server
 python .\trading_service.py <command> ...
 ```
 
-Examples:
+示例：
 
 ```bash
 python trading_service.py doctor
@@ -45,22 +45,22 @@ python trading_service.py quote "000008" --user-id "USER_001"
 python trading_service.py buy "000008" --quantity 100 --price 2.50 --inner-code 8 --user-id "USER_001"
 ```
 
-## Configuration
+## 配置
 
-Copy `.env.example` to `.env` inside the skill directory and fill in the API token provided by the platform.
+将 skill 目录下的 `.env.example` 复制为 `.env`，并填入平台提供的 API Token。
 
-Required when backend auth is enabled:
+后端认证启用时必填：
 - `PAPER_TRADING_API_TOKEN`
 
-Common settings:
+常用配置项：
 - `PAPER_TRADING_API_BASE_URL`
 - `PAPER_TRADING_USER_ID`
 - `PAPER_TRADING_API_TIMEOUT_SECONDS`
 
-Platform integrations should pass a real business user ID instead of sharing the default `local-user`.
+平台集成时应传入真实的业务用户 ID，而非使用默认的 `local-user`。
 
-## Release hygiene
+## 发布注意事项
 
-- do not commit a real `.env`
-- do not commit local runtime logs, SQLite files, tokens, phone numbers, or verification codes
-- keep `.env.example` as the only committed environment template
+- 不要提交真实的 `.env` 文件
+- 不要提交本地运行日志、SQLite 文件、Token、手机号或验证码
+- 仅保留 `.env.example` 作为唯一提交的环境变量模板
