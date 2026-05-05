@@ -1,43 +1,52 @@
 ---
 name: event-intelligence
-description: 定时推送、手动获取事件资讯，并支持查询单条事件详情。
-description_zh: 事件语义检索定时推送 + 单条详情查询
-description_en: Scheduled event push notifications with detail drill-down
+description: 定时获取事件资讯并自动推送到飞书；支持手动获取事件资讯和查询特定事件资讯详情。
 ---
-
-## Cron Session 约束
-
-- 任何 cron / 定时事件如果需要绑定 session，必须显式写 `sessionTarget="isolated"`。
-- 严禁使用 `sessionTarget="current"`。
-- 严禁使用 `sessionTarget="session:xxx"`，以及任何 `session:*` 形式的已有 session 绑定。
 
 # Event Intelligence — 事件情报技能
 
 ## 概述
 
-本技能分为两部分：
+本技能分为三类能力：
 
-1. **定时推送、手动获取**：按用户设定的时间间隔（默认 5 分钟），周期性调用事件语义检索 API，获取最新事件摘要并推送给用户。**无新事件时静默跳过，不发送消息。** 用户可以指定获取最近一段时间内的最新事件。
+1. **自动推送、手动获取**：按运行时配置，由本地 Python 常驻/系统定时任务执行。用户也可以指定获取最近一段时间内的最新事件。
 2. **事件详情查询**：当用户对某条推送的事件感兴趣时，通过 `eventId` 调用详情接口获取完整分析数据。
-3. **每日事件统计**：每 24 小时自动统计 S 级、A 级事件数量，生成简报推送。随定时推送一起启停。
+3. **每日事件统计**：按运行时配置，由本地 Python 常驻/系统定时任务执行。
+
+## 强约束（必须遵守）
+
+- 自动推送和每日事件统计禁止依赖会话轮询或临时 session 级定时器；必须通过 `push_runtime.py` + 系统任务调度（crontab）执行。
+- 自动推送的功能必须通过 `push_runtime.py` 执行抓取、结构化、飞书推送、落盘。
+- 禁止为事件自动推送创建Gateway cron / `jobs.json` / `agentTurn` / `announce` 任务；这类任务在网页端或 isolated session 中没有稳定飞书会话目标，容易报 `Delivering to Feishu requires target` 或 `device identity required`。
+- 禁止把任何固定 chat_id/open_id/webhook 写进 skill 源码、示例任务或通用说明。飞书接收目标必须作为部署时状态配置，由 `push_runtime.py` 从运行时配置、环境变量或内部配置中解析。
+
+## 对外沟通规则（必须遵守）
+
+- 面向普通用户说明配置缺失时，不要提及 `openclaw/openclaw.json`、`openclaw.json`、`state/push_config.json`、`OPENCLAW_CONFIG_PATH` 等内部文件或环境变量；除非用户明确要求调试内部配置路径。
+- 飞书接收目标缺失时，使用用户可理解的话术：`请提供飞书接收目标：Webhook URL，或飞书自建应用的 receive_id（群聊或个人）。如果要推送到群聊，请提供群聊 chat_id/receive_id；如果不知道，我可以根据群聊名称或成员协助查找。`
+- 如果已检测到飞书 App ID/App Secret，但缺少 receive_id，不要说“在 openclaw.json 中配置”；应说“还缺少飞书接收目标，请提供群聊的 receive_id/chat_id，或提供 Webhook URL。”
+- 回复中不得展示 Qveris token 明文；设置完成后只确认“已保存/已配置”。
 
 ## 文件结构
 
 ```
 event-intelligence/
 ├── SKILL.md              # 本文件，技能说明
-├── event_query.py         # 业务函数（search_events / get_event_detail / daily_event_summary）
-├── qveris_client.py       # Qveris REST 客户端（search + execute_tool）
+├── event_query.py                # 事件查询、详情和每日总结函数
+├── qveris_client.py              # Qveris REST 客户端
+├── push_runtime.py               # 自动推送运行时
 └── state/
-    ├── push_config.json   # 推送运行时配置（间隔、关键词、上次推送时间、每日统计开关等）
-    └── push_history.json  # 最近几次推送的事件列表缓存（用于按序号/描述查详情）
+    ├── push_config.json  # 推送运行时配置（调度、关键词、上次推送时间等）
+    └── push_history.json         # 推送历史（保留最近5天）
 ```
 
 ## 前置条件
 
-- Python 3.10+（仅依赖 stdlib，无需 pip 安装任何包）
-- 网络可达 `https://qveris.ai`
-- API Key 通过环境变量 `QVERIS_TOKEN` 读取，必须提前配置。事件数据通过 Qveris 平台调用 deepseekdata 语义事件检索工具，无需本地持有 deepseekdata 独立 API Key。
+- Python 3.10+
+- 网络可达 `https://qveris.ai`与飞书
+- Qveris token 必须提前配置。运行时按内部配置、`state/push_config.json` 中的 `qveris_token`、进程环境变量 `QVERIS_TOKEN` / `QVERIS_API_TOKEN` 的顺序解析；如果用户未提供，必须先提醒用户提供 token，写入配置后才能继续执行事件查询、推送或定时任务。
+- 飞书 App Secret 等敏感凭证不写入代码或 `state/push_config.json`；运行时从环境变量或内部配置读取。接收目标 receive_id 和 Webhook 属于部署时状态，只能写入当前安装实例，不得写入通用源码或示例任务。
+- 飞书推送支持两种目标：webhook，或自建应用。自建应用需要 App ID、App Secret 和接收目标 receive_id；运行时会用 App ID/App Secret 调用飞书 `tenant_access_token/internal` 获取 token 后再推送消息。
 
 ## 环境适配
 
@@ -63,241 +72,133 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
 
 后续所有 Python 调用统一使用 `$PY` 代替 `python3` / `python`。
 
+### 敏感配置读取规则
+
+- Qveris：token 解析优先级为内部配置、`state/push_config.json` 的 `qveris_token`、进程环境变量 `QVERIS_TOKEN` / `QVERIS_API_TOKEN`。缺失时必须明确要求用户提供 token，并通过 stdin 或文件持久化：`printf "%s" "<TOKEN>" | $PY push_runtime.py set-qveris-token --token -`；已有本地密钥文件时优先执行 `$PY push_runtime.py set-qveris-token --token-file "<TOKEN_FILE>"`。不要把 token 明文放进普通 CLI 参数。
+- 飞书 webhook：读取 `state/push_config.json` 的 `feishu_webhooks` 以及 `openclaw/openclaw.json` 中飞书/飞书 Lark 上下文里的 webhook 字段。
+- 飞书自建应用：App ID/App Secret 从环境变量或 `openclaw/openclaw.json` 中飞书/飞书 Lark 上下文读取；接收目标 receive_id/receive_id_type 优先读取 `state/push_config.json` 中的部署时配置，其次读取环境变量和 `openclaw/openclaw.json`。拿到 App ID/App Secret 后，运行时调用飞书 `auth/v3/tenant_access_token/internal` 获取 token，再调用 `im/v1/messages` 推送。
+- 如果用户提供飞书群聊 receive_id/chat_id，执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id` 持久化到当前安装实例；如果用户提供 Webhook URL，通过 stdin 或文件持久化：`printf "%s" "<WEBHOOK_URL>" | $PY push_runtime.py set-feishu-webhook --url -`；已有本地文件时优先执行 `$PY push_runtime.py set-feishu-webhook --url-file "<WEBHOOK_FILE>"`。`set-feishu-webhook` 默认替换现有 webhook 列表；明确需要多个 webhook 时追加 `--append`。这些值属于用户部署状态，不得提交到通用源码。
+- `openclaw/openclaw.json` 的默认查找路径为本项目及上级目录中的 `openclaw/openclaw.json` 或 `openclaw.json`；如用户另有位置，先设置 `OPENCLAW_CONFIG_PATH`。
+
 ---
 
-## 第一部分：定时推送
+## 第一部分：自动推送（Python 独立运行）
 
 ### 启动流程
 
 用户说"开始推送"/"启动事件推送"/"开始定时推送"等触发本技能后：
 
-1. **读取配置**：读取 `state/push_config.json`，获取当前推送参数。
-2. **确认参数**：向用户确认以下参数（如果配置文件已有值，展示当前值并问是否需要修改）：
-   - `interval_minutes`：推送间隔（默认 5 分钟）
-   - `keyword`：语义检索关键词（默认 "AI"，用户可改为任意主题，比如：半导体、机器人、新能源）
+1. **检查密钥和目标**：执行 `$PY push_runtime.py status`，确认 `qveris.has_token=true`；确认 `feishu.webhook_count > 0`，或 `feishu.has_app_id=true`、`feishu.has_app_secret=true`、`feishu.has_receive_id=true`。如果 Qveris token 缺失，先提醒用户提供，并通过 stdin 或 `--token-file` 保存；如果只有飞书 App ID/App Secret 但没有接收目标，提醒用户提供飞书接收目标（Webhook URL，或自建应用的 receive_id/receive_id_type；群聊可提供 chat_id/receive_id）。拿到 receive_id 后执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id`；拿到 Webhook URL 后通过 stdin 或 `--url-file` 保存。
+2. **读取配置**：读取 `state/push_config.json`，获取当前推送参数。
+3. **确认参数**：向用户确认以下参数（如果配置文件已有值，展示当前值并问是否需要修改）：
+   - `schedule`：推送调度档位（默认 `5m`），只能选择 `5m`、`15m`、`60m`、`24h`、`daily-0915`、`daily-1245`、`daily-1445`
+   - `keywords`：语义检索关键词列表（默认 `["AI"]`，最多 3 个；用户可改为多个主题，比如：AI、半导体、光模块）。如果用户提供超过 3 个关键词，直接回复暂不支持超过 3 个关键词，请用户删减到 3 个以内，不要写入配置。
    - `page_size`：每次推送返回的事件条数（默认 10）
-3. **写入配置**：将确认后的参数写入 `state/push_config.json`。
-4. **立即执行一次推送**：调用 `search_events()` 获取当前时间窗口内的事件，格式化后推送给用户（如果无事件则静默跳过）。
-5. **设置定时任务**：利用 OpenClaw 的 cron 机制，按 `interval_minutes` 的间隔周期执行推送。
-6. **同时启动每日统计**：创建一个每 24 小时执行一次的 cron 任务，用于统计 S/A 级事件数量（详见下方"每日事件统计"章节）。
+4. **写入配置**：首次使用先执行 `$PY push_runtime.py init-config` 创建模板；再执行 `$PY push_runtime.py configure --active --keywords "<KEYWORD1>,<KEYWORD2>" --schedule <SCHEDULE> --page-size <PAGE_SIZE>` 写入确认后的参数。启动推送时必须设置 `active=true`；每日统计与事件推送同开同停。
+5. **立即执行一次推送**：执行 `$PY push_runtime.py run-once --quiet` 获取当前时间窗口内的事件，直接推送飞书并落盘。
+6. **立即执行一次每日统计**：执行 `$PY push_runtime.py run-daily-summary --quiet`。每日统计与事件推送同开同停。
+7. **安装系统调度**：执行 `$PY push_runtime.py install-schedule`，交给系统定时任务持续运行。
+8. **回复用户**：开启成功后必须提示当前调度，并列出可选项，例如：“事件推送服务已开启。当前按 `<当前档位>` 推送。如果有其他需要，可以改成：每5分钟、每15分钟、每60分钟、每24小时、开盘前15分钟(09:15)、下午开盘前15分钟(12:45)、收盘前15分钟(14:45)。”
+
+**注意**：执行命令前先定位到代码所在路径，`cd "$SKILL_DIR"`，并统一使用 `$PY`执行命令。
 
 ### 推送执行逻辑
 
-每次推送执行时：
-
-1. 运行以下命令获取事件列表：
-   ```bash
-   cd "$SKILL_DIR"
-   $PY -c "
-   import json, sys
-   sys.stdout.reconfigure(encoding='utf-8')
-   from event_query import search_events
-   result = search_events(keyword=\"\"\"<KEYWORD>\"\"\", minutes=<INTERVAL_MINUTES>, page_size=<PAGE_SIZE>)
-   print(json.dumps(result, ensure_ascii=False, indent=2))
-   "
-   ```
-2. 解析返回的 JSON，提取事件列表。
-3. 如果 `total > 0`，按以下格式推送给用户：
-
-   ```
-   📡 事件推送 (HH:MM)  —— 最近 N 分钟共 X 条新事件（最多推送10条）
-
-   ━━━━━━━━━━━━━━━━━━━━━━━━
-   [1] 标题
-       ⏰ 2026-04-09 10:30:00 ｜ 信号等级: S级
-       📌 一句话总结: xxxxx（取自 original_summary 字段）
-       📝 事件摘要: xxxxx（取自 summary 字段）
-
-   ━━━━━━━━━━━━━━━━━━━━━━━━
-   [2] ...
-
-   💡 对某条感兴趣？直接说「第X条详细看看」或描述标题关键词即可查看完整分析。
-   🔄 想换个主题？说「关注半导体」即可切换关键词。
-   ⏱️ 想调整推送频率？说「改为15分钟推送一次」。
-   ```
-
-   **字段映射**：
-   - 标题 ← `compliantTitle`
-   - 时间 ← `eventPublishDate`
-   - 信号等级 ← `signalLevel`
-   - 一句话总结 ← `original_summary`（产业链维度的精炼总结）
-   - 事件摘要 ← `summary`（事件核心要点概述）
-
-   两个摘要都必须输出，不可省略。`original_summary` 偏产业链视角，`summary` 偏事件本身，互相补充。
-
-   > **前缀清洗**：`event_query.py` 已在返回数据时自动去除 `original_summary` 和 `summary` 开头的"研报"/"研报指出"等冗余前缀及紧跟的标点，agent 直接使用返回值即可，无需额外处理。
-
-4. 如果 `total == 0`，**静默跳过，不向用户发送任何消息**。仅更新 `state/push_config.json` 中的 `last_push_time`，不写入推送历史，不输出任何内容。
-5. **缓存推送结果**（仅 `total > 0` 时执行）：将本次推送的事件列表写入 `state/push_history.json`，供后续详情查询使用（见下方"推送历史缓存"章节）。
-6. 更新 `state/push_config.json` 中的 `last_push_time`。
-
-### 推送历史缓存
-
-每次推送成功后，必须将结果追加到 `state/push_history.json`。
-
-**缓存规则：**
-
-1. 每次推送结果作为一个 batch 存入 `batches` 数组，新 batch 插入数组头部（最新在前）。
-2. `batches` 最多保留 `max_batches` 条（默认 3），超出时丢弃最旧的。
-3. 每个 batch 中的事件保留推送时的序号（从 1 开始），与推送给用户时展示的 `[1] [2] [3]` 对应。
-
-**batch 结构示例：**
-
-```json
-{
-  "max_batches": 3,
-  "batches": [
-    {
-      "push_time": "2026-04-09T10:30:00",
-      "keyword": "AI",
-      "events": [
-        {
-          "index": 1,
-          "eventId": "76679",
-          "compliantTitle": "某事件标题",
-          "eventPublishDate": "2026-04-09 10:15:00",
-          "signalLevel": "high",
-          "original_summary": "产业链总结...",
-          "summary": "摘要文本..."
-        },
-        {
-          "index": 2,
-          "eventId": "76680",
-          "compliantTitle": "另一个事件",
-          "eventPublishDate": "2026-04-09 10:20:00",
-          "signalLevel": "medium",
-          "original_summary": "...",
-          "summary": "..."
-        }
-      ]
-    }
-  ]
-}
+运行下面命令：
+```bash
+cd "$SKILL_DIR"
+$PY push_runtime.py init-config
+$PY push_runtime.py status
+$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id
+# 或：printf "%s" "<WEBHOOK_URL>" | $PY push_runtime.py set-feishu-webhook --url -
+$PY push_runtime.py configure --active --keywords "<KEYWORD1>,<KEYWORD2>" --schedule 5m --page-size 10
+$PY push_runtime.py run-once --quiet
+$PY push_runtime.py run-daily-summary --quiet
 ```
 
-**写入方式：**
+### 安装系统级定时任务（推荐）
 
-每次推送执行完毕后，运行：
+执行命令：
 
 ```bash
 cd "$SKILL_DIR"
-$PY -c "
-import json
-from datetime import datetime
+$PY push_runtime.py install-schedule
+```
+- Linux/macOS 下写入当前用户 crontab
+- `install-schedule` 写入 crontab。它会同时安装事件推送和每日统计两条任务，并把 stdout/stderr 丢弃到 `/dev/null`；运行时异常会写入 `push_history.json` 的 `last_error`，可通过 `$PY push_runtime.py status` 查看。
 
-history_path = 'state/push_history.json'
-with open(history_path, 'r') as f:
-    history = json.load(f)
+停止自动推送：
 
-new_batch = {
-    'push_time': datetime.now().strftime('%Y-%m-%dT%H:%M:%S+08:00'),
-    'keyword': '<KEYWORD>',
-    'events': <EVENTS_LIST>
-}
-
-history['batches'].insert(0, new_batch)
-max_b = history.get('max_batches', 3)
-history['batches'] = history['batches'][:max_b]
-
-with open(history_path, 'w') as f:
-    json.dump(history, f, ensure_ascii=False, indent=2)
-"
+```bash
+$PY push_runtime.py uninstall-schedule
 ```
 
-其中 `<EVENTS_LIST>` 是本次推送返回的事件列表（每个事件增加 `index` 字段，从 1 开始编号）。
+### 修改推送调度
 
-### 修改推送间隔
+当用户说"改为 15 分钟推送一次"/"每天上午 9:15 推送"等：
 
-当用户说"改为 15 分钟推送一次"/"推送间隔改成 30 分钟"等：
+1. 解析用户指定的新调度档位。只能选择：`5m`（每 5 分钟）、`15m`（每 15 分钟）、`60m`（每 60 分钟）、`24h`（每 24 小时）、`daily-0915`（每天 09:15）、`daily-1245`（每天 12:45）、`daily-1445`（每天 14:45）。
+2. 执行 `$PY push_runtime.py configure --schedule <SCHEDULE>` 更新 `schedule`。
+3. 若当前 `active=true`，执行一次 `$PY push_runtime.py install-schedule` 使新调度立即生效。
+4. 回复用户确认："已将推送调度调整为 `<对应档位>`。可选档位包括：每5分钟、每15分钟、每60分钟、每24小时、开盘前15分钟(09:15)、下午开盘前15分钟(12:45)、收盘前15分钟(14:45)。"
 
-1. 解析用户指定的新间隔值。
-2. 更新 `state/push_config.json` 中的 `interval_minutes`。
-3. 重新设置 cron 定时任务为新间隔。
-4. 同时在 `memory/YYYY-MM-DD.md` 中记录本次修改。
-5. 回复用户确认："已将推送间隔调整为 XX 分钟。"
+如果用户指定了其它间隔或时间（例如每7分钟、每30分钟、10:00、15:00 等），不要自行换算、不要写入配置。直接回复："暂不支持这个推送时间。当前只支持：每5分钟、每15分钟、每60分钟、每24小时、开盘前15分钟(09:15)、下午开盘前15分钟(12:45)、收盘前15分钟(14:45)。"
 
 ### 修改关键词
 
-当用户说"关注半导体"/"推送关键词改为新能源"等：
+当用户说"关注半导体"/"推送关键词改为新能源"/"同时关注半导体和光模块"等：
 
-1. 更新 `state/push_config.json` 中的 `keyword`。
-2. 立即用新关键词执行一次推送。
-3. 回复用户确认。
+1. 提取关键词并限制最多 3 个。超过 3 个时直接回复暂不支持超过 3 个关键词，请用户删减到 3 个以内，不要写入配置。
+2. 执行 `$PY push_runtime.py configure --keywords "<KEYWORD1>,<KEYWORD2>,<KEYWORD3>"` 更新 `keywords`。单关键词也使用 `--keywords "<KEYWORD>"`。
+3. 立即用新关键词执行一次推送。
+4. 回复用户确认。
 
 ### 停止推送
 
 当用户说"停止推送"/"关闭推送"等：
 
-1. 移除事件推送的 cron 定时任务。
-2. **同时移除每日统计的 cron 定时任务**（如果存在）。
-3. 更新 `state/push_config.json`，将 `active` 设为 `false`。
+1. 停止自动推送代码的运行
+2. **同时移除每日统计的 crontab 任务**（如果存在）。
+3. 执行 `$PY push_runtime.py configure --inactive`，将 `active` 设为 `false`。
 4. 回复用户确认："已停止事件推送和每日统计。随时可以说'开始推送'重新启动。"
 
----
+### 运行时行为
 
-### 每日事件统计
+`run-once` 执行链路：
 
-#### 概述
+1. 读取 `push_config.json`
+2. 读取 `keywords`，对每个关键词并行调用 `search_events()` 拉取当前 `schedule` 对应时间窗口内的事件
+3. 结构化格式化
+4. 合并同批结果并按 `eventId` 去重，事件上保留 `matched_keywords`；再基于历史索引过滤已推送事件
+5. 推送到运行时解析出的飞书目标（webhook 或自建应用接收目标）。自建应用路径会先用 App ID/App Secret 获取 `tenant_access_token`，再调用消息接口发送。
+6. 写入 `push_history.json`；只有真实飞书发送成功后才更新 `sent_event_index` 和 `last_push_time`，`--dry-run` 不会把事件标记为已推送。
+7. 清理超过 `retention_days` 的历史与去重索引
 
-与定时推送配套的 24 小时周期统计功能。启动推送时自动一并启动，停止推送时一并关闭。统计过去 24 小时内按信号等级（S 级、A 级）的事件数量，以简报形式推送给用户。
+无新事件时：静默，不推送，只更新运行时间。
 
-#### 启动方式
+`run-daily-summary` 执行链路：
 
-随定时推送一起自动启动，**不需要**用户单独触发。启动推送时：
+1. 读取 `push_config.json` 的当前 `keywords`
+2. 调用 `daily_event_summary_many(keywords=<当前 keywords>, minutes=1440)` 实时查询过去 24 小时事件；内部按关键词并行拉明细，再按 `eventId` 全局去重
+3. 每日统计必须展示各关键词分别命中的 S 级、A 级、其他等级和合计；同时展示去重后的总数和重复命中条数
+4. 不从 `push_history.json` 聚合或展示历史关键词
 
-1. 在设置事件推送 cron 的同时，额外创建一个 **每 24 小时执行一次** 的 cron 定时任务。
-2. 该 cron 任务的执行内容是：调用 `daily_event_summary()` 并将结果格式化输出给用户。
-3. 在 `state/push_config.json` 中记录 `daily_summary_active: true`。
+**上下文边界**：自动任务由 crontab 在独立进程中执行，`install-schedule` 生成的命令使用 `--quiet >/dev/null 2>&1`。虽然 stdout/stderr 被丢弃，但 CLI 捕获到的异常会持久化到 `push_history.json.last_error`，`status` 会展示最近错误。
 
-#### 执行逻辑
-
-每次执行时：
-
-1. 运行以下命令获取统计数据：
-   ```bash
-   cd "$SKILL_DIR"
-   $PY -c "
-   import json, sys
-   sys.stdout.reconfigure(encoding='utf-8')
-   from event_query import daily_event_summary
-   result = daily_event_summary(keyword=\"\"\"<KEYWORD>\"\"\", minutes=1440)
-   print(json.dumps(result, ensure_ascii=False, indent=2))
-   "
-   ```
-2. 解析返回的 JSON。
-3. 如果 `total > 0`，按以下格式输出给用户：
-
-   ```
-   📊 每日事件统计 (HH:MM)
-   ━━━━━━━━━━━━━━━━━━━━━━━━
-   🔍 关键词: <KEYWORD>
-   📅 统计周期: YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM（过去 24 小时）
-
-   🔴 S 级事件: X 条
-   🟠 A 级事件: Y 条
-   📋 其他等级: Z 条
-   ── 合计: N 条
-
-   💡 想查看具体事件？说「查最近24小时的事件」。
-   ```
-
-4. 如果 `total == 0`，**静默跳过，不发送任何消息**（与事件推送保持一致）。
-
-#### 停止方式
-
-随定时推送一起关闭，无需单独操作。
-
----
-
-### 手动查询事件
+### 手动指定并立即推送事件
 
 当用户说"查最近5小时的事件"/"最近有什么AI事件"/"搜一下半导体事件"等：
 
 1. 解析用户指定的时间范围（如"5小时" → minutes=300），如未指定默认 60 分钟。
-2. 使用当前配置的 keyword（或用户指定的关键词）调用 `search_events()`。
-3. **按推送格式输出结果**（与定时推送的格式完全一致，参见"推送执行逻辑"第3步），但末尾的引导语替换为手动查询专用引导（见下方）。
-4. **同样写入 `state/push_history.json`**，确保后续可以通过"第X条详细看看"查询详情。
-5. 更新 `state/push_config.json` 的 `last_push_time`。
+2. 使用当前配置的 `keywords`（或用户指定的关键词），执行一次手动推送。多关键词最多 3 个，超过 3 个直接回复不支持，不要调用命令：
+   ```bash
+   cd "$SKILL_DIR"
+   $PY push_runtime.py manual-push --minutes <MINUTES> --keywords "<KEYWORD1>,<KEYWORD2>"
+   ```
+   如不推飞书，可追加 `--no-feishu`。
+3. `manual-push` 会直接推送到飞书，并把本次事件 JSON 打印到 stdout，供当前上下文继续使用。
+4. **同样写入 `state/push_history.json`**，确保后续可以通过"第X条详细看看"查询详情。`--dry-run` / `--no-feishu` 只记录本地批次，不更新 `sent_event_index` 和 `last_push_time`，正式推送仍会把这些事件视为未推送。
+5. 只有真实飞书发送成功时，才更新 `state/push_config.json` 的 `last_push_time`。
 6. **后续引导**（追加在事件列表末尾）：
    - 有事件时：
      ```
@@ -310,19 +211,6 @@ with open(history_path, 'w') as f:
      💡 最近 N 分钟/小时暂无新事件。想扩大范围？说「查最近24小时」。
      🔄 想换个主题？说「搜一下半导体事件」。
      ```
-
-```bash
-cd "$SKILL_DIR"
-$PY -c "
-import json, sys
-sys.stdout.reconfigure(encoding='utf-8')
-from event_query import search_events
-result = search_events(keyword=\"\"\"<KEYWORD>\"\"\", minutes=<MINUTES>, page_size=<PAGE_SIZE>)
-print(json.dumps(result, ensure_ascii=False, indent=2))
-"
-```
-
----
 
 ## 第二部分：事件详情查询
 
@@ -343,30 +231,29 @@ print(json.dumps(result, ensure_ascii=False, indent=2))
 
 #### 步骤 1：定位 eventId
 
-1. **读取推送历史**：读取 `state/push_history.json`。
-2. **根据用户意图匹配事件**：
-   - **按序号**（如"第3条"/"第三条详细看看"）：取最近一个 batch 中 `index == 3` 的事件。
-   - **按标题/摘要关键词**（如"关于芯片的"/"长飞光纤那条"）：在最近 batch 的 `compliantTitle` 、`summary`和 `original_summary` 中做模糊匹配。如果匹配到多条，列出候选（带序号）让用户选择。
+1. **优先使用当前上下文**：如果本轮或上一轮刚展示过事件列表，用户说"第X条"时直接以那份刚展示的列表为准，不重新推断"最新批次"。
+2. **读取推送历史**：当前上下文没有可用事件列表时，读取 `state/push_history.json`。
+3. **最新批次定义**：`batches` 数组顺序是唯一权威顺序，`batches[0]` 就是最新批次；不要按 `push_time`、`last_push_time` 或写入时间重新排序。
+4. **根据用户意图匹配事件**：
+   - **按序号**（如"第3条"/"第三条详细看看"）：取当前上下文列表或 `batches[0]` 中 `index == 3` 的事件。
+   - **按标题/摘要关键词**（如"关于芯片的"/"长飞光纤那条"）：在当前上下文列表或 `batches[0]` 的 `compliantTitle` 、`summary`和 `original_summary` 中做模糊匹配。如果匹配到多条，列出候选（带序号）让用户选择。
    - **指定历史批次**（如"上一轮第2条"）：在 `batches[1]`（上一轮）中按序号查找。
-3. **如果找不到**：提示用户"未在最近的推送记录中找到该事件"，并列出最近一批事件的标题供用户确认。
-4. **提取 eventId 和对应的 keyword**（每个 batch 记录了当时的 keyword，eventId 在缓存中但不展示给用户）。
+   - **长时历史批次**（如"上午的某一条"）：在所有历史记录batch中的 `compliantTitle` 、`summary`和 `original_summary` 中做模糊匹配。如果匹配到多条，列出候选让用户选择。
+5. **如果找不到**：提示用户"未在最近的推送记录中找到该事件"，并列出最近一批事件的标题供用户确认。
+6. **提取 eventId 和对应的 `matched_keywords`**（每个 batch 记录了当时的 `keywords`，事件自身记录 `matched_keywords`，eventId 在缓存中但不展示给用户）。
 
 #### 步骤 2：调用详情接口
 
 ```bash
 cd "$SKILL_DIR"
-$PY -c "
-import json, sys
-sys.stdout.reconfigure(encoding='utf-8')
-from event_query import get_event_detail
-detail = get_event_detail(keyword=\"\"\"<KEYWORD>\"\"\", event_id='<EVENT_ID>')
-print(json.dumps(detail, ensure_ascii=False, indent=2))
-"
+$PY -c "import json; from event_query import get_event_detail; print(json.dumps(get_event_detail(keyword='AI', event_id='76679'), ensure_ascii=False, indent=2))"
 ```
 
 #### 步骤 3：格式化输出 — 结构化事件分析报告
 
 将 API 返回的原始 JSON 组织成以下专业分析报告。报告分为 **8 个板块**，按固定顺序输出，每个板块之间用分隔线隔开。如果某个字段为空或 null，该板块标注"暂无数据"，不省略板块本身。
+
+**飞书发送渲染要求**：如果需要把本详细报告发送到飞书，必须通过飞书的富文本/卡片接口发送（如 interactive card、post/rich text 等能够渲染 Markdown 或表格的消息类型），不要使用普通文本消息接口或纯文本 `message` 工具发送。第七部分“核心标的”依赖 Markdown 表格渲染；若走纯文本通道，飞书会直接显示 `| 标的名称 | 代码 | ... |` 原始符号，视为发送方式错误。
 
 ---
 
@@ -617,22 +504,30 @@ print(json.dumps(detail, ensure_ascii=False, indent=2))
 ```json
 {
   "active": false,
-  "interval_minutes": 5,
-  "keyword": "AI",
+  "schedule": "5m",
+  "keywords": ["AI"],
   "page_size": 10,
-  "last_push_time": null,
-  "daily_summary_active": false
+  "last_push_time": "",
+  "daily_summary_time": "09:00",
+  "feishu_webhooks": [],
+  "feishu_receive_id": "",
+  "feishu_receive_id_type": "chat_id",
+  "qveris_token": ""
 }
 ```
 
 | 字段                    | 类型    | 说明                                              |
 |-------------------------|---------|---------------------------------------------------|
 | `active`                | bool    | 推送是否正在运行                                   |
-| `interval_minutes`      | int     | 推送间隔，单位分钟，默认 5                         |
-| `keyword`               | string  | 语义检索关键词，默认 "AI"                          |
+| `schedule`              | string  | 推送调度档位：`5m`、`15m`、`60m`、`24h`、`daily-0915`、`daily-1245`、`daily-1445` |
+| `keywords`              | array   | 实际用于检索的关键词列表，默认 `["AI"]`，最多 3 个；超过 3 个直接不支持 |
 | `page_size`             | int     | 每次推送返回的事件条数，默认 10                     |
-| `last_push_time`        | string  | 上次推送时间 (ISO 格式)，初始为 null               |
-| `daily_summary_active`  | bool    | 每日统计是否正在运行，随 active 一起启停            |
+| `last_push_time`        | string  | 上次真实飞书推送时间 (ISO 格式)，初始为空字符串     |
+| `daily_summary_time`    | string  | 每日统计的 crontab 时间，默认 `09:00` |
+| `feishu_webhooks`       | array   | 部署时配置的飞书 Webhook URL 列表；回复和日志中不要展示明文 |
+| `feishu_receive_id`     | string  | 部署时配置的飞书自建应用接收目标；群聊通常为 chat_id/receive_id |
+| `feishu_receive_id_type`| string  | 飞书接收目标类型，默认 `chat_id` |
+| `qveris_token`          | string  | Qveris token fallback；优先使用内部配置，回复和日志中不要展示明文 |
 
 ---
 
@@ -662,3 +557,37 @@ print(json.dumps(detail, ensure_ascii=False, indent=2))
 - 如果 API 调用失败，直接告知用户"事件数据获取失败"及错误原因，不编造数据。
 - 间隔修改等用户偏好必须持久化到 `state/push_config.json`，不依赖会话记忆。
 - 同时在 `memory/YYYY-MM-DD.md` 中记录重要的配置变更，便于跨会话回溯。
+
+## 执行策略
+
+### 用户说“开始推送 / 开启事件监控”
+
+1. 若配置不存在，先执行 `$PY push_runtime.py init-config`。
+2. 执行 `$PY push_runtime.py status` 检查密钥状态。若 `qveris.has_token=false`，请用户提供 Qveris token，并通过 stdin 或 `--token-file` 保存；若飞书没有 webhook 且自建应用缺少 App ID/App Secret/receive_id 任一项，请用户提供缺失的飞书凭据或接收目标（Webhook URL，或自建应用 App ID/App Secret/receive_id），但对外不要提及内部配置文件名。拿到 receive_id 后执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id`；拿到 Webhook URL 后通过 stdin 或 `--url-file` 保存。
+3. 确认运行时已解析到飞书发送目标；执行 `$PY push_runtime.py configure --active --keywords "<KEYWORD1>,<KEYWORD2>" --schedule <SCHEDULE> --page-size <PAGE_SIZE>` 写入关键词、调度档位、条数，并设置 `active=true`。单关键词也使用 `--keywords "<KEYWORD>"`。多关键词最多 3 个，超过 3 个直接回复不支持，不要调用命令。每日统计与事件推送一起启动。
+4. 执行 `$PY push_runtime.py run-once --quiet`（立即验证一次推送链路，但不把事件 JSON 放入当前上下文）。
+5. 执行 `$PY push_runtime.py install-schedule`。
+6. 执行 `$PY push_runtime.py status` 并回告用户：“已交给系统定时任务执行，不再依赖会话轮询。当前按 `<当前档位>` 推送。如果有其他需要，可以改成：每5分钟、每15分钟、每60分钟、每24小时、开盘前15分钟(09:15)、下午开盘前15分钟(12:45)、收盘前15分钟(14:45)。”
+7. 不要创建或启用Gateway cron / `jobs.json` / `agentTurn` / `announce` 任务；如果发现旧任务存在，应说明它们是另一套机制，建议停用后只保留系统 crontab。
+
+### 用户说“改成每15分钟 / 改关键词 / 改推送飞书”
+
+1. 执行 `$PY push_runtime.py configure` 更新关键词、调度档位、条数或启停状态。
+2. 若当前 `active=true`，重新执行 `$PY push_runtime.py install-schedule`。
+3. 如果用户指定的是支持档位，反馈：“已将推送调度调整为 `<对应档位>`，重新安装调度后生效。”如果用户指定了其它值，反馈：“暂不支持这个推送时间。当前只支持：每5分钟、每15分钟、每60分钟、每24小时、开盘前15分钟(09:15)、下午开盘前15分钟(12:45)、收盘前15分钟(14:45)。”
+
+### 用户说“查最近5小时 / 手动推送一次”
+
+1. 解析时间窗口、关键词和条数。
+2. 执行 `$PY push_runtime.py manual-push --minutes <MINUTES> --keywords "<KEYWORD1>,<KEYWORD2>"`；单关键词也使用 `--keywords "<KEYWORD>"`。多关键词最多 3 个，超过 3 个直接回复不支持。
+3. 将命令 stdout 中的事件列表用于当前上下文回复；历史写入和飞书推送由 `manual-push` 完成。
+
+### 用户说“停止推送”
+
+1. 执行 `$PY push_runtime.py uninstall-schedule`
+2. 运行时会同时移除事件推送和每日统计 crontab，并将 `active` 改为 `false`；也可以执行 `$PY push_runtime.py configure --inactive` 确认状态关闭。
+3. 回告已停止
+
+### 用户说“看某条详情”
+
+走第二段逻辑，实时查询并生成详细报告。

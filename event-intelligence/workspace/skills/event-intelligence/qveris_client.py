@@ -30,12 +30,29 @@ from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from runtime_config import resolve_qveris_token
+
+
+def _apply_qveris_token_fallbacks() -> None:
+    token = resolve_qveris_token()
+    if token:
+        os.environ["QVERIS_TOKEN"] = token
+
 
 @dataclass
 class QVerisConfig:
-    api_key: str = os.getenv("QVERIS_TOKEN", "")
-    base_url: str = os.getenv("QVERIS_BASE_URL", "https://qveris.ai/api/v1")
-    timeout: int = int(os.getenv("QVERIS_TIMEOUT", "60"))
+    api_key: str = ""
+    base_url: str = ""
+    timeout: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        _apply_qveris_token_fallbacks()
+        if not self.api_key:
+            self.api_key = resolve_qveris_token()
+        if not self.base_url:
+            self.base_url = os.getenv("QVERIS_BASE_URL", "https://qveris.ai/api/v1")
+        if self.timeout is None:
+            self.timeout = int(os.getenv("QVERIS_TIMEOUT", "60"))
 
 
 class QVerisClient:
@@ -54,7 +71,10 @@ class QVerisClient:
     def __init__(self, config: Optional[QVerisConfig] = None) -> None:
         self.config = config or QVerisConfig()
         if not self.config.api_key:
-            raise ValueError("QVERIS_TOKEN is not set")
+            raise ValueError(
+                "QVeris token 未配置。请先在 OpenClaw 中配置，或保存到运行时配置，"
+                "或设置 QVERIS_TOKEN/QVERIS_API_TOKEN。"
+            )
         self.headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -75,15 +95,18 @@ class QVerisClient:
                 else ""
             )
             raise RuntimeError(
-                f"QVeris HTTP error {exc.code}: {body or exc.reason}"
+                f"QVeris HTTP 错误 {exc.code}：{body or exc.reason}"
             ) from exc
         except URLError as exc:
-            raise RuntimeError(f"QVeris request failed: {exc.reason}") from exc
+            raise RuntimeError(f"QVeris 请求失败：{exc.reason}") from exc
         if len(raw_bytes) > self.MAX_RESPONSE_BYTES:
             raise RuntimeError(
-                f"QVeris response exceeded limit {self.MAX_RESPONSE_BYTES} bytes"
+                f"QVeris 响应超过大小限制：{self.MAX_RESPONSE_BYTES} 字节"
             )
-        return json.loads(raw_bytes.decode("utf-8"))
+        try:
+            return json.loads(raw_bytes.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"QVeris 返回的不是有效 JSON（位置 {exc.pos}）。") from exc
 
     def search_tools(self, query: str, limit: int = 10) -> Dict[str, Any]:
         payload = {"query": query, "limit": limit}
@@ -126,8 +149,8 @@ class QVerisClient:
                         declared_len = -1
                     if declared_len > limit:
                         raise RuntimeError(
-                            f"QVeris full-content too large: Content-Length={declared_len} "
-                            f"exceeds limit {limit}"
+                            f"QVeris 完整内容过大：Content-Length={declared_len}，"
+                            f"超过限制 {limit} 字节"
                         )
                 # Read one extra byte so we can detect silent overflow when
                 # Content-Length is missing or understated.
@@ -139,14 +162,17 @@ class QVerisClient:
                 else ""
             )
             raise RuntimeError(
-                f"QVeris full-content download HTTP error {exc.code}: {body or exc.reason}"
+                f"QVeris 完整内容下载 HTTP 错误 {exc.code}：{body or exc.reason}"
             ) from exc
         except URLError as exc:
             raise RuntimeError(
-                f"QVeris full-content download failed: {exc.reason}"
+                f"QVeris 完整内容下载失败：{exc.reason}"
             ) from exc
         if len(raw_bytes) > limit:
             raise RuntimeError(
-                f"QVeris full-content exceeded limit {limit} bytes while streaming"
+                f"QVeris 完整内容读取时超过大小限制：{limit} 字节"
             )
-        return json.loads(raw_bytes.decode("utf-8"))
+        try:
+            return json.loads(raw_bytes.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"QVeris 完整内容不是有效 JSON（位置 {exc.pos}）。") from exc

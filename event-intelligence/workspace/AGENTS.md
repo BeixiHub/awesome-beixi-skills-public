@@ -282,13 +282,13 @@ Also consult `routing-rules.json` (especially its `pipelines.event-intelligence`
 8) Event intelligence / 事件情报 → event-intelligence
 - Triggers: 开始推送、启动推送、事件推送、定时推送、停止推送、关闭推送、推送间隔、第X条详细看看、那个关于XX的事件、查最近X小时/分钟事件、最近有什么事件、查事件、搜事件、看看事件、有什么新事件
 - Action: load and follow `skills/event-intelligence/SKILL.md`
-- Part 1 (定时推送): 按用户设定间隔（默认 5 分钟）周期调用事件语义检索 API 并推送摘要
-- Part 2 (事件详情): 用户指定 eventId 后调用详情 API 返回完整分析
-- Part 3 (手动查询): 用户指定时间范围（如"查最近5小时"）时，调用 search_events(minutes=用户指定) 并按推送格式输出，同时写入 push_history
-- Config: `skills/event-intelligence/state/push_config.json` 持久化间隔、关键词等参数
+- Part 1 (定时推送): 必须执行 `push_runtime.py configure --active ...`，再通过 `install-schedule` 写入系统 crontab；不要创建Gateway cron / `jobs.json` / `agentTurn` / `announce` 任务
+- Part 2 (事件详情): 用户按序号或标题描述指定历史事件后，调用详情 API 返回完整分析
+- Part 3 (手动查询): 用户指定时间范围（如"查最近5小时"）时，执行 `push_runtime.py manual-push`，推送飞书、输出当前上下文结果，并写入 push_history
+- Config: `skills/event-intelligence/state/push_config.json` 持久化间隔、关键词和部署时飞书接收目标；飞书 App Secret 等敏感凭证从环境变量或内部配置读取
 - 间隔修改同时记录到 `memory/YYYY-MM-DD.md`
 
-10) Safety & cost
+9) Safety & cost
 - Prefer minimal toolset; avoid parallel skill spam. When in doubt, ask.
 - For paid APIs: confirm before large/looped calls. Batch where possible.
 

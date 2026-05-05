@@ -1,8 +1,15 @@
 {
   "active": false,
-  "interval_minutes": 5,
-  "keyword": "AI",
+  "keywords": [],
+  "schedule": "5m",
   "page_size": 10,
-  "last_push_time": "",
-  "daily_summary_active": false
+  "retention_days": 5,
+  "daily_summary_time": "09:00",
+  "task_name": "OpenClaw-Event-Intelligence-Push",
+  "feishu_webhooks": [],
+  "feishu_receive_id": "",
+  "feishu_receive_id_type": "chat_id",
+  "qveris_token": "",
+  "history_file": "state/push_history.json",
+  "last_push_time": ""
 }

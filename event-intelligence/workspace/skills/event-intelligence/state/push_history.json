@@ -1,20 +1,9 @@
 {
-  "max_batches": 3,
-  "batches": [
-    {
-      "push_time": "",
-      "keyword": "",
-      "events": []
-    },
-    {
-      "push_time": "",
-      "keyword": "",
-      "events": []
-    },
-    {
-      "push_time": "",
-      "keyword": "",
-      "events": []
-    }
-  ]
+  "retention_days": 5,
+  "max_batches": 1000,
+  "batches": [],
+  "sent_event_index": {},
+  "last_run_time": "",
+  "last_push_time": "",
+  "last_error": ""
 }
