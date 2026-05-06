@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import socket
+import sys
 import unittest
 import urllib.error
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "call_remote_phase_api.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("call_remote_phase_api", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

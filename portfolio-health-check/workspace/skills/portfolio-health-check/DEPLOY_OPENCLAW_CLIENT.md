@@ -64,32 +64,24 @@ OpenClaw 客户端不再本地执行：
 
 这些文件和目录基本都属于 Phase 2 / Phase 3 私有实现细节，客户端没有必要持有。
 
-## 4. 客户端环境变量
+## 4. 客户端凭证
 
-OpenClaw 客户端至少需要这两个配置：
+客户端凭证存储在 `~/.config/portfolio-health-check/credentials.env`，由 `call_remote_phase_api.py` 和 `qveris_client.py` 自动加载。
 
-- `PORTFOLIO_API_BASE_URL`
-- `PORTFOLIO_API_TOKEN`（如服务端启用鉴权）
+| 变量 | 用途 | 获取方式 |
+|------|------|---------|
+| `PORTFOLIO_API_KEY` | 调用深度诊断和优化 API（必填） | 前往 [deepseekdata.com/arena.html](https://deepseekdata.com/arena.html) 注册并充值，点击右上角「API 开放平台」获取 |
+| `QVERIS_TOKEN` | Phase 1 标的识别增强（选填） | 前往 [qveris.ai](https://qveris.ai) 获取 |
 
-当前桥接脚本 [call_remote_phase_api.py](./call_remote_phase_api.py) 已内置固定服务地址：
+用户首次使用时，SKILL.md 的初始化流程会自动检测凭证并引导用户配置。
 
-```bash
-http://82.157.41.134:9000
-```
+其他可选环境变量（一般不需要用户配置）：
 
-这意味着：
-
-- OpenClaw 不额外配置时，也可以直接连接固定服务器运行
-- 如果要切换到其他环境，可通过 `PORTFOLIO_API_BASE_URL` 或 `--base-url` 覆盖
-- 如果后续切换环境，只需要覆盖 `PORTFOLIO_API_BASE_URL`
-- `PORTFOLIO_API_TOKEN` 仍然保留为可选鉴权项
-
-示例：
-
-```bash
-export PORTFOLIO_API_BASE_URL="https://your-api-server.example.com"
-export PORTFOLIO_API_TOKEN="your-token-if-needed"
-```
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `PORTFOLIO_API_BASE_URL` | API 网关地址 | `https://admin.deepseekdata.com` |
+| `PORTFOLIO_API_TENANT_ID` | 多租户 id | `1` |
+| `PHC_CREDENTIALS_PATH` | 凭证文件路径覆盖 | `~/.config/portfolio-health-check/credentials.env` |
 
 ## 5. 客户端如何调用远端 Phase 2 / Phase 3
 

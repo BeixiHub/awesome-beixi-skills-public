@@ -3,12 +3,6 @@ name: portfolio-quick-diagnosis
 description: 整理持仓、补全标的识别、生成确认表和快速诊断结果。先做识别与整理，完成后只问缺失的关键字段。
 ---
 
-## Cron Session 约束
-
-- 任何 cron / 定时事件如果需要绑定 session，必须显式写 `sessionTarget="isolated"`。
-- 严禁使用 `sessionTarget="current"`。
-- 严禁使用 `sessionTarget="session:xxx"`，以及任何 `session:*` 形式的已有 session 绑定。
-
 # 投资组合快速诊断
 
 ## 目标

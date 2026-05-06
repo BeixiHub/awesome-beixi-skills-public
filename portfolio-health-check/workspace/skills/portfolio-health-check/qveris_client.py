@@ -23,6 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from credentials_utils import load_credentials
 from date_utils import shift_months, shift_years, format_ymd
 
 import pandas as pd
@@ -31,6 +32,9 @@ try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
+
+
+load_credentials()
 
 
 @dataclass

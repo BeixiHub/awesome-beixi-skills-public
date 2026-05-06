@@ -1,6 +1,68 @@
 # Portfolio Health Check — 变更说明
 
-> 更新日期: 2026-04-23
+> 更新日期: 2026-04-30
+
+---
+
+## [2026-04-30] Phase 3 客户端适配、等待时间修正、模型推荐
+
+### call_remote_phase_api.py
+
+- `_extract_client_markdown` 限定为仅 Phase 3 执行（Phase 2 不需要 .md 提取）
+
+### 等待时间提示修正
+
+- Phase 2 提示改为"约 5 分钟"（之前的"约 30 分钟"是超时上限，非实际耗时）
+- Phase 3 提示改为"约 7 分钟"（含多次 LLM 调用，实测 334-442 秒）
+- 排队时追加提醒"当前有其他任务排队，时间可能延长"
+
+### README
+
+- 新增"模型要求"章节，推荐 MiniMax M2.7/M2.5 和 DeepSeek V4-Pro/V4-Flash
+- 基模能力不足时最常见故障：Phase 2 payload JSON 格式错误、Phase 3 报告被 LLM 擅自改写
+
+### 服务器端变更（详见 [Beixi-Skills-Shop PR #14](https://github.com/BeixiHub/Beixi-Skills-Shop/pull/14)）
+
+- 中文编码修复（mojibake）：`resp.encoding = "utf-8"` 修复 HiDream API 中文乱码
+- 宏观情报重写：`macro_intelligence.py` 基于工具 params schema 动态绑定参数
+- 模型路由：三个并行 section 统一使用 HiDream GPT-5.4（GLM-5.1 JSON 解析不稳定）
+- Phase 3 实测：334 秒，~96K tokens，~$0.15-0.20/次
+
+## [2026-04-30] run_id 任务隔离、重复内容精简与 stdout 输出改进
+
+### 任务隔离（run_id）
+
+- 每次进入阶段二时生成 `run_id`（UUID 前 8 位），所有中间文件存入 `state/{run_id}/`
+- 解决旧文件覆盖和误发过期结果的问题：不同次分析的 payload、PDF、JSON 互不干扰
+- 咨询结束时删除整个 `state/{run_id}/` 目录即可
+- 涉及文件：主 SKILL.md（数据流、快捷流程、清理）、deep-diagnosis/SKILL.md、optimization/SKILL.md
+
+### Skill 精简
+
+- 移除 3 个子 skill 的 Cron Session 约束（只保留主 SKILL.md 一处）
+- deep-diagnosis：参数映射表简化为字段-合法值对照（交互脚本由总控负责）
+- optimization：移除冗余的可选约束表格（改为一行说明）、收口话术改为引用总控
+
+### 参数兼容性校验
+
+- deep-diagnosis 新增 `position_style × rebalance_frequency` 5×5 兼容性矩阵
+- 服务器端 `thresholds.py` 强制校验，客户端预检避免用户等待后收到 400 错误
+- ❌ 不合法组合阻止提交、⚠️ 降级组合提前告知用户
+
+### 等待时间提示修正
+
+- Phase 2 提示从"约 30 分钟"改为"约 5 分钟"（30 分钟是客户端超时上限，非实际耗时）
+- Phase 3 新增提示"约 1 分钟"
+- 排队时追加提醒"当前有其他任务排队，时间可能延长"，与实际耗时估计分开表述
+
+### call_remote_phase_api.py
+
+- `--output` 模式下 stdout 不再静默：PDF 任务输出 `{status, phase, output_file, size_bytes}`，JSON 任务输出摘要（headline、sections/tables 计数、warnings 等）
+- 错误提示 URL 更新为 `https://deepseekdata.com/arena.html`
+
+### 服务器
+
+- 安装中文字体（google-noto-sans-cjk-sc-fonts + google-noto-serif-cjk-sc-fonts），修复 PDF 中文显示为豆腐块
 
 ---
 

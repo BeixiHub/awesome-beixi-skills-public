@@ -12,6 +12,11 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from credentials_utils import load_credentials
+
+
+load_credentials()
+
 
 # All traffic goes through the ReportServer Java gateway (Yudao) hosted on the
 # BeixiHub (蓓曦) 星途平台 at admin.deepseekdata.com. The gateway internally
@@ -448,6 +453,55 @@ def download_pdf(
     )
 
 
+def _extract_client_markdown(result: dict, json_path: Path) -> Path | None:
+    """Extract client_output.markdown and save as .md alongside the JSON."""
+    data = result.get("data") if isinstance(result.get("data"), dict) else result
+    co = data.get("client_output") if isinstance(data, dict) else None
+    if not isinstance(co, dict):
+        return None
+    markdown = co.get("markdown", "")
+    if not markdown:
+        return None
+    md_path = json_path.with_suffix(".md")
+    md_path.write_text(markdown + "\n", encoding="utf-8")
+    return md_path
+
+
+def _build_result_summary(result: dict, phase: str, output_file: str) -> dict:
+    """Extract key fields from a phase result for stdout confirmation."""
+    summary: dict = {
+        "status": result.get("status", "ok"),
+        "phase": phase,
+        "output_file": output_file,
+    }
+    if phase in ("phase2", "phase2_pdf"):
+        co = result.get("client_output") or result.get("data", {}).get("client_output")
+        if isinstance(co, dict):
+            summary["headline"] = co.get("headline", "")
+            section_count = len(co.get("sections", []))
+            table_count = len(co.get("tables", []))
+            summary["sections"] = section_count
+            summary["tables"] = table_count
+            summary["has_markdown"] = bool(co.get("markdown"))
+    elif phase == "phase3":
+        data = result.get("data", {})
+        co = data.get("client_output") if isinstance(data, dict) else None
+        if isinstance(co, dict):
+            summary["headline"] = co.get("headline", "")
+            summary["has_markdown"] = bool(co.get("markdown"))
+        ei = data.get("execution_info") if isinstance(data, dict) else None
+        if isinstance(ei, dict):
+            summary["rescore_executed"] = ei.get("rescore_executed")
+            summary["stress_test_executed"] = ei.get("stress_test_executed")
+            warnings = ei.get("warnings", [])
+            if warnings:
+                summary["warnings"] = warnings
+    em = result.get("error_message")
+    if em:
+        summary["error_message"] = em
+    return summary
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Call remote portfolio phase APIs via the ReportServer gateway."
@@ -484,7 +538,7 @@ def main() -> int:
     if not args.api_key:
         sys.stderr.write(
             "error: PORTFOLIO_API_KEY (or --api-key) is required. "
-            "Apply for one and recharge at https://admin.deepseekdata.com (蓓曦星途平台).\n"
+            "Apply for one at https://deepseekdata.com/arena.html (蓓曦星途平台).\n"
         )
         return 2
     if not args.tenant_id:
@@ -501,6 +555,12 @@ def main() -> int:
             output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(pdf_bytes)
+            sys.stdout.write(json.dumps({
+                "status": "ok",
+                "phase": args.phase,
+                "output_file": str(output_path),
+                "size_bytes": len(pdf_bytes),
+            }, ensure_ascii=False) + "\n")
         else:
             sys.stdout.buffer.write(pdf_bytes)
         if content_disposition:
@@ -514,6 +574,12 @@ def main() -> int:
             output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(rendered + "\n", encoding="utf-8")
+            summary = _build_result_summary(result, args.phase, str(output_path))
+            if args.phase == "phase3":
+                md_path = _extract_client_markdown(result, output_path)
+                if md_path:
+                    summary["markdown_file"] = str(md_path)
+            sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
         else:
             sys.stdout.write(rendered + "\n")
     return 0

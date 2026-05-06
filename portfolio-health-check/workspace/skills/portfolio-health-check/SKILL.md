@@ -23,9 +23,63 @@ description: 串联投资组合快速诊断、深度诊断和优化处方。默�
 - 可以给出方向性的配置优化建议，但必须保持为“仅供参考，不构成具体买卖指令”
 - 如果用户追问“到底买什么/卖什么/现在能不能下单”，重复说明你只能提供研究结论和配置方向，不能代替其自行决策
 
-## 对话开场
+## ⚠️ 初始化流程（强制，不可跳过）
 
-当用户触发本技能时（提到持仓、股票组合、帮我看看等），用以下模板开场：
+**收到用户第一条消息时，无论用户说了什么（包括"你好"、发持仓、问问题），都必须从第 1 步开始执行。在完成初始化之前，禁止回复用户任何实质内容、禁止进入阶段一/二/三。**
+
+### 第 1 步：检查凭证
+
+立即运行以下命令（不要先回复用户）：
+
+```bash
+CRED_PATH="${PHC_CREDENTIALS_PATH:-$HOME/.config/portfolio-health-check/credentials.env}"
+if [ -f "$CRED_PATH" ]; then
+  source "$CRED_PATH"
+  [ -n "$PORTFOLIO_API_KEY" ] && echo "API_KEY_OK" || echo "API_KEY_MISSING"
+  [ -n "$QVERIS_TOKEN" ] && echo "QVERIS_OK" || echo "QVERIS_MISSING"
+else
+  echo "API_KEY_MISSING"
+  echo "QVERIS_MISSING"
+fi
+```
+
+根据输出，记录凭证状态，然后进入第 2 步。
+
+### 第 2 步：根据凭证状态决定提示语
+
+将凭证状态对应的提示语**插入到对话开场的开头**（第 3 步），然后直接进入第 3 步。不要单独发送提示语。
+
+| 凭证状态 | 插入的提示语 |
+|---------|------------|
+| 两个都 OK | 无需插入任何提示 |
+| 只缺 `QVERIS_TOKEN` | `提示：金融数据查询凭证（QVeris Token）未配置，第一阶段的标的识别将使用网络搜索替代，准确度可能稍低。如果您有 QVeris Token，可以随时告诉我补充（申请地址：https://qveris.ai ）。` |
+| 缺 `PORTFOLIO_API_KEY`（无论有没有 QVeris） | `⚠️ 诊断服务凭证（蓓曦星途平台 API Key）未配置，第二阶段（深度诊断）和第三阶段（优化处方）将无法使用。您仍然可以使用第一阶段的快速诊断。如需完整服务，请前往 https://deepseekdata.com/arena.html 注册账号并充值，然后点击右上角的「API 开放平台」获取 API Key，把 Key 发给我即可。` |
+| 两个都缺 | 同时输出上面两条 |
+
+**用户之后补充提供凭证时**，写入文件：
+
+```bash
+CRED_PATH="${PHC_CREDENTIALS_PATH:-$HOME/.config/portfolio-health-check/credentials.env}"
+mkdir -p "$(dirname "$CRED_PATH")" && \
+cat > "$CRED_PATH" << 'CREDENTIALS_EOF'
+PORTFOLIO_API_KEY="<用户提供的值>"
+QVERIS_TOKEN="<用户提供的值，没有则留空>"
+CREDENTIALS_EOF
+chmod 600 "$CRED_PATH"
+```
+
+写入后重新运行第 1 步的检查命令验证，确认后告知用户"配置完成"。
+
+**运行时拦截规则**：如果 `PORTFOLIO_API_KEY` 始终未配置，在用户完成阶段一后、即将进入阶段二时，必须再次提醒并阻止：
+```
+抱歉，深度诊断需要蓓曦星途平台 API Key 才能运行。请前往 https://deepseekdata.com/arena.html 注册账号并充值，然后点击右上角的「API 开放平台」获取 API Key，把 Key 发给我即可继续。
+```
+
+### 第 3 步：对话开场
+
+**只有到达这一步，才可以开始与用户的实质对话。**
+
+如果用户的第一条消息是打招呼（"你好"等），用以下模板开场（如果第 2 步有提示语，插在模板最前面）：
 
 ```
 您好！我可以为您做一次投资组合健康检查，包含三个阶段：
@@ -43,9 +97,18 @@ description: 串联投资组合快速诊断、深度诊断和优化处方。默�
 格式不限，我来帮您整理。
 ```
 
-如果用户直接发了持仓列表，跳过开场白，直接进入阶段一。
+如果用户第一条消息就是持仓列表，跳过开场白，直接进入阶段一（但仍然要先输出第 2 步的凭证提示语，如果有的话）。
+
+### 凭证安全说明
+
+- 凭证文件默认存储在 `~/.config/portfolio-health-check/credentials.env`，可通过 `PHC_CREDENTIALS_PATH` 覆盖；不在 skill 目录内
+- 文件权限 600（仅当前用户可读写）
+- skill 的 `.gitignore` 排除了 `*.env` 和 `credentials*`，即使误操作也不会被 git 跟踪
+- `call_remote_phase_api.py` 和 `qveris_client.py` 会自动从该文件加载凭证，无需手动 source
 
 ## 数据流示意
+
+每次进入阶段二时生成 `run_id`（UUID 前 8 位），本次咨询的所有中间文件存入 `state/{run_id}/`，按任务隔离。
 
 ```
 阶段一输出:
@@ -54,19 +117,19 @@ description: 串联投资组合快速诊断、深度诊断和优化处方。默�
 
 阶段二输入:
   ← holdings[] + cash_pct + params{4个参数}
-  → 写入文件: state/phase2_payload.json
-  → 运行: python call_remote_phase_api.py phase2_pdf state/phase2_payload.json --output state/phase2_report.pdf
-  → 输出: state/phase2_report.pdf（或降级为 state/phase2_result.json）
+  → 写入: state/{run_id}/phase2_payload.json
+  → 运行: python call_remote_phase_api.py phase2_pdf state/{run_id}/phase2_payload.json --output state/{run_id}/phase2_report.pdf
+  → 输出: state/{run_id}/phase2_report.pdf（或降级为 state/{run_id}/phase2_result.json）
 
 阶段三输入:
-  ← state/phase2_result.json 的完整内容 作为 diagnosis_result
+  ← state/{run_id}/phase2_result.json 的完整内容 作为 diagnosis_result
   ← constraints{用户约束}
-  → 写入文件: state/phase3_payload.json
-  → 运行: python call_remote_phase_api.py phase3 state/phase3_payload.json --output state/phase3_result.json
-  → 输出: state/phase3_result.json
+  → 写入: state/{run_id}/phase3_payload.json
+  → 运行: python call_remote_phase_api.py phase3 state/{run_id}/phase3_payload.json --output state/{run_id}/phase3_result.json
+  → 输出: state/{run_id}/phase3_result.json
 ```
 
-说明：以上 `state/` 文件都是当前咨询流程的临时状态文件，咨询结束时会在通知用户后统一清理。
+`state/{run_id}/` 下的文件都是当前咨询的临时状态，咨询结束时统一清理整个目录。
 
 ## 阶段一：快速诊断
 
@@ -222,12 +285,12 @@ description: 串联投资组合快速诊断、深度诊断和优化处方。默�
 如果用户在阶段一完成后说"直接给我优化建议"或"跳过分析直接优化"：
 
 1. 仍然需要收集 Phase 2 的 4 个参数（因为 Phase 3 依赖 Phase 2 的输出）
-2. 收集完参数后，**静默运行** Phase 2 API（用 `phase2` 而非 `phase2_pdf`，不需要 PDF）：
+2. 生成 `run_id` 并组装 payload（同深度诊断第 1 步），**静默运行** Phase 2 API（用 `phase2` 而非 `phase2_pdf`）：
    ```bash
-   python call_remote_phase_api.py phase2 state/phase2_payload.json --output state/phase2_result.json
+   python call_remote_phase_api.py phase2 state/{run_id}/phase2_payload.json --output state/{run_id}/phase2_result.json
    ```
 3. **不要向用户展示 Phase 2 结果**
-4. 告诉用户："好的，后台诊断已完成。接下来收集您的投资约束，以便生成优化方案。"
+4. 告诉用户："好的，后台诊断已完成。接下来收集您的投资约束。"
 5. 进入 Phase 3 约束收集和执行
 
 ## 常见场景处理
@@ -242,15 +305,18 @@ description: 串联投资组合快速诊断、深度诊断和优化处方。默�
 
 ## 结束咨询与状态清理
 
-- `state/` 下的 `phase2_payload.json`、`phase2_report.pdf`、`phase2_result.json`、`phase3_payload.json`、`phase3_result.json` 都视为**本次咨询的临时文件**
-- **不要**在咨询尚未结束时主动清理这些文件
-- 当你判断流程已完成，或用户表示“可以了”“结束吧”“先这样”时，先明确提醒：
+- `state/{run_id}/` 下的所有文件都是本次咨询的临时文件
+- **不要**在咨询尚未结束时主动清理
+- 流程完成或用户表示结束时，提醒后删除整个目录：
 
 ```text
-出于隐私保护考虑，本次咨询结束后，我会删除这次分析在 `state/` 目录下生成的临时文件，包括 payload、PDF 和结果 JSON。删除后将不再保留。
+出于隐私保护考虑，我会删除本次分析的临时文件（state/{run_id}/ 目录）。
 ```
 
-- 在完成提醒后，清理 `state/` 下本次咨询生成的临时文件
+```bash
+RUN_ID="<本次实际 run_id>"
+[ -n "$RUN_ID" ] && rm -rf "state/$RUN_ID"
+```
 
 ## 错误处理
 
@@ -261,7 +327,7 @@ description: 串联投资组合快速诊断、深度诊断和优化处方。默�
 | API 返回错误 | "分析过程中遇到问题：{error_message}。请检查持仓信息是否正确。" |
 
 补充说明：
-- Phase 2 / PDF 客户端超时按 `max(stock_count × 3 分钟, 30 分钟)` 动态计算（最低 30 分钟保底，因为 Phase-2 有 LLM 舆情 + PDF 渲染等固定开销）；进入 Phase 2 前必须主动把"预计需要约 X 分钟"告诉用户，避免用户以为卡住。详见 `portfolio-deep-diagnosis/SKILL.md` 第 2 步。
+- Phase 2 通常耗时约 5 分钟，Phase 3 通常耗时约 7 分钟（含多次 LLM 调用）。如果轮询过程中发现任务排队（`queue > 0`），追加提醒"当前有其他任务排队，时间可能延长"。不要把客户端超时上限（30 分钟）当作预计等待时间告诉用户。
 - 网络抖动时客户端会用同一幂等 key 自动重试 1 次，不会重复扣分；如两次都失败才会抛连接错误给用户。
 
 ## 禁止事项
