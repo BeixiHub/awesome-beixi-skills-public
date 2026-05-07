@@ -9,7 +9,7 @@
 当前测试环境：
 
 ```text
-http://42.193.103.122:7085
+https://admin.deepseekdata.com
 ```
 
 业务接口需要 `PAPER_TRADING_API_TOKEN`。不要把真实 token 写进 `SKILL.md`、`.env.example` 或提交到仓库；只放在部署环境变量或本地 `.env`。

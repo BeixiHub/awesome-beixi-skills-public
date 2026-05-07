@@ -30,7 +30,7 @@ def error_payload(message: str, *, code: str = "CLI_ERROR", data: Any | None = N
 
 class BackendClient:
     def __init__(self, user_id: str | None = None) -> None:
-        self.base_url = os.getenv("PAPER_TRADING_API_BASE_URL", "http://42.193.103.122:7085").rstrip("/")
+        self.base_url = os.getenv("PAPER_TRADING_API_BASE_URL", "https://admin.deepseekdata.com").rstrip("/")
         self.timeout = int(os.getenv("PAPER_TRADING_API_TIMEOUT_SECONDS", "30"))
         self.user_id = user_id or os.getenv("PAPER_TRADING_USER_ID", "local-user")
         self.token = os.getenv("PAPER_TRADING_API_TOKEN", "").strip()
@@ -86,7 +86,7 @@ def client(args: argparse.Namespace) -> BackendClient:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    base = os.getenv("PAPER_TRADING_API_BASE_URL", "http://42.193.103.122:7085").rstrip("/")
+    base = os.getenv("PAPER_TRADING_API_BASE_URL", "https://admin.deepseekdata.com").rstrip("/")
     data = {
         "apiBaseUrl": base,
         "userId": getattr(args, "user_id", None) or os.getenv("PAPER_TRADING_USER_ID", "local-user"),

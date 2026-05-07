@@ -1,6 +1,6 @@
 # API Contract
 
-当前测试后端地址：`http://42.193.103.122:7085`
+当前测试后端地址：`https://admin.deepseekdata.com`
 
 所有业务接口都有两套路径：
 

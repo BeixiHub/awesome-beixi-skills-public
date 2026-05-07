@@ -24,7 +24,7 @@ description: Client skill for OpenClaw/ArkClaw-compatible agents to use the Beix
 
 在本目录创建 `.env`，参考 `.env.example`：
 
-- `PAPER_TRADING_API_BASE_URL`: 后端地址，当前测试环境使用 `http://42.193.103.122:7085`
+- `PAPER_TRADING_API_BASE_URL`: 后端地址，当前测试环境使用 `https://admin.deepseekdata.com`
 - `PAPER_TRADING_API_TOKEN`: 后端 API token，如果后端启用了鉴权必须配置
 - `PAPER_TRADING_USER_ID`: 当前智能体用户 ID，默认 `local-user`；上架平台应覆盖为真实业务用户 ID
 
