@@ -36,6 +36,19 @@ except Exception:
 
 load_credentials()
 
+HANGSENG_SECURITY_PROFILE_TOOL_ID = (
+    "hangseng_polysource.stock.basicCorpInfo.retrieve.v2.d7c68583"
+)
+HANGSENG_SECURITY_PROFILE_TOOL_PREFIX = (
+    "hangseng_polysource.stock.basicCorpInfo.retrieve.v2."
+)
+HANGSENG_SECURITY_PROFILE_QUERY_TOOL_ID = (
+    "hangseng_polysource.stock.basicCorpInfo.query.v2.d7c68583"
+)
+HANGSENG_SECURITY_PROFILE_QUERY_TOOL_PREFIX = (
+    "hangseng_polysource.stock.basicCorpInfo.query.v2."
+)
+
 
 @dataclass
 class QVerisConfig:
@@ -142,21 +155,30 @@ class QVerisClient:
         profile_data = None
         search_id = search_result.get("search_id", "")
         candidate_tools = [
-            ("mcp_gildata.companybasicinfo.v1", {"query": identifier}),
-            ("ths_ifind.company_basics.v1", {"codes": identifier}),
+            (
+                HANGSENG_SECURITY_PROFILE_TOOL_ID,
+                HANGSENG_SECURITY_PROFILE_TOOL_PREFIX,
+                {"StockObject": [identifier], "pageNo": 1, "pageSize": 10},
+            ),
+            (
+                HANGSENG_SECURITY_PROFILE_QUERY_TOOL_ID,
+                HANGSENG_SECURITY_PROFILE_QUERY_TOOL_PREFIX,
+                {"StockObject": [identifier], "pageNo": 1, "pageSize": 10},
+            ),
+            ("ths_ifind.company_basics.v1", "", {"codes": identifier}),
         ]
-        for target_tool_id, params in candidate_tools:
+        search_tools = search_result.get("results", [])
+        for target_tool_id, tool_prefix, params in candidate_tools:
             if profile_data is not None:
                 break
-            matched = any(
-                t.get("tool_id") == target_tool_id
-                for t in search_result.get("results", [])
+            matched_tool_id = self._match_tool_id(
+                search_tools, target_tool_id, tool_prefix
             )
-            if not (matched and search_id):
+            if not (matched_tool_id and search_id):
                 continue
             try:
                 run_result = self._run_tool(
-                    tool_id=target_tool_id,
+                    tool_id=matched_tool_id,
                     search_id=search_id,
                     parameters=params,
                     session_id=session_id,
@@ -170,6 +192,21 @@ class QVerisClient:
             "profile": profile_data,
             "tools_found": tools_found[:5],
         }
+
+    @staticmethod
+    def _match_tool_id(
+        tools: List[Dict[str, Any]], exact_tool_id: str, tool_prefix: str = ""
+    ) -> str:
+        for tool in tools:
+            tool_id = tool.get("tool_id", "")
+            if tool_id == exact_tool_id:
+                return tool_id
+        if tool_prefix:
+            for tool in tools:
+                tool_id = tool.get("tool_id", "")
+                if tool_id.startswith(tool_prefix):
+                    return tool_id
+        return ""
 
     def _run_tool(
         self,
@@ -192,10 +229,10 @@ class QVerisClient:
         """Extract ticker/name/industry from tool execution result.
 
         Handles two formats:
-        - gildata: markdown table in result.data.results[].table_markdown
+        - polysource: markdown table in result.data.results[].table_markdown
         - ths_ifind: dict rows via _flatten_result_rows
         """
-        # Try gildata markdown table first
+        # Try polysource markdown table first.
         try:
             results_list = raw.get("result", {}).get("data", {}).get("results", [])
             for item in results_list:
@@ -231,22 +268,39 @@ class QVerisClient:
             pass
 
         try:
+            row = self._find_profile_row(raw)
+            if row:
+                return row
+        except Exception:
+            pass
+
+        try:
             rows = self._flatten_result_rows(raw)
             if rows:
                 row = rows[0]
                 return {
                     "ticker": (
                         row.get("ths_thscode_stock")
+                        or row.get("StockCode")
+                        or row.get("SecuCode")
+                        or row.get("secuCode")
                         or row.get("thscode")
                         or row.get("code")
                         or ""
                     ),
                     "name": (
-                        row.get("ths_corp_cn_name_stock") or row.get("name") or ""
+                        row.get("ths_corp_cn_name_stock")
+                        or row.get("SecuAbbr")
+                        or row.get("ChiName")
+                        or row.get("CompanyName")
+                        or row.get("name")
+                        or ""
                     ),
                     "industry": (
                         row.get("ths_the_ths_industry_stock")
                         or row.get("ths_the_sw_industry_stock")
+                        or row.get("IndustryName")
+                        or row.get("Industry")
                         or row.get("industry")
                         or ""
                     ),
@@ -255,6 +309,83 @@ class QVerisClient:
             pass
         return None
 
+    def _find_profile_row(self, payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        best_row: Optional[Dict[str, str]] = None
+        best_score = 0
+        for row in self._walk_dicts(payload):
+            lower = {str(k).lower(): v for k, v in row.items()}
+            if self._looks_like_schema_row(lower):
+                continue
+            ticker = (
+                lower.get("stockcode")
+                or lower.get("secucode")
+                or lower.get("stockobject")
+                or lower.get("code")
+                or ""
+            )
+            name = (
+                lower.get("stockname")
+                or lower.get("chiname")
+                or lower.get("secuabbr")
+                or lower.get("secabbr")
+                or lower.get("companyname")
+                or lower.get("name")
+                or ""
+            )
+            industry = (
+                lower.get("industrysw")
+                or lower.get("industryzjh")
+                or lower.get("industryzx")
+                or lower.get("industryjy")
+                or lower.get("industryname")
+                or lower.get("industry")
+                or ""
+            )
+            if self._looks_like_label_row(ticker, name, industry):
+                continue
+            score = int(bool(ticker)) + int(bool(name)) * 2 + int(bool(industry))
+            if score > best_score:
+                best_score = score
+                best_row = {
+                    "ticker": str(ticker or ""),
+                    "name": str(name or ""),
+                    "industry": str(industry or ""),
+                }
+        return best_row if best_score >= 2 else None
+
+    @staticmethod
+    def _looks_like_schema_row(row: Dict[str, Any]) -> bool:
+        if not row:
+            return False
+        type_markers = {
+            "string",
+            "int",
+            "integer",
+            "double",
+            "float",
+            "date",
+            "datetime",
+            "boolean",
+        }
+        values = [str(value).strip().lower() for value in row.values()]
+        marker_count = sum(1 for value in values if value in type_markers)
+        return marker_count >= 3 and marker_count >= len(values) * 0.8
+
+    @staticmethod
+    def _looks_like_label_row(ticker: Any, name: Any, industry: Any) -> bool:
+        labels = {"股票代码", "股票名称", "所属申万行业", "所属证监会行业", "所属中信行业"}
+        values = {str(value).strip() for value in (ticker, name, industry) if value}
+        return bool(values) and values.issubset(labels)
+
+    def _walk_dicts(self, value: Any) -> Iterable[Dict[str, Any]]:
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from self._walk_dicts(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from self._walk_dicts(child)
+
     _FULL_CODE_PATTERN = re.compile(r"^(\d{6})\.([A-Z]{2})$")
     _BARE_CODE_PATTERN = re.compile(r"^\d{6}$")
     _ETF_SUFFIXES = re.compile(r"(ETF|LOF)$", re.IGNORECASE)
@@ -262,7 +393,7 @@ class QVerisClient:
 
     TOOL_CODE_CONVERTER = "ths_ifind.code_converter.v1"
     TOOL_COMPANY_BASICS = "ths_ifind.company_basics.v1"
-    TOOL_INDUSTRY = "mcp_gildata.stockbelongindustry.v1"
+    TOOL_INDUSTRY = HANGSENG_SECURITY_PROFILE_TOOL_ID
     TOOL_REALTIME_QUOTE = "ths_ifind.real_time_quotation.v1"
 
     def _parse_identifier_type(self, identifier: str) -> str:
@@ -382,7 +513,7 @@ class QVerisClient:
         return self.execute_tool(
             self.TOOL_INDUSTRY,
             "",
-            {"query": f"{name}的所属申万行业"},
+            {"StockObject": [name], "pageNo": 1, "pageSize": 10},
             session_id=session_id,
         )
 
@@ -391,6 +522,16 @@ class QVerisClient:
     ) -> Optional[List[Dict[str, str]]]:
         if not raw.get("success"):
             return None
+        profile = self._find_profile_row(raw)
+        if profile and profile.get("industry"):
+            return [
+                {
+                    "level": "申万行业",
+                    "name": profile["industry"],
+                    "code": "",
+                    "standard": "申万",
+                }
+            ]
         results = raw.get("result", {}).get("data", {}).get("results", [])
         if not results:
             return None
