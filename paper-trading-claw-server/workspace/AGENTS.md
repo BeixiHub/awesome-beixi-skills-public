@@ -16,7 +16,7 @@ Route to `skills/paper-trading-claw-server/SKILL.md` when the user mentions any 
 - 实时价 / 行情 / 股票代码 / 股票名称解析 / innerCode
 
 Workspace notes:
-- this workspace is only for A-share / ETF paper-trading through the Beixi backend API
+- this workspace is only for A-share / ETF paper-trading through the Beixi transfer-service API
 - do not expose API tokens, local `.env` values, backend database paths, or raw service internals to end users
 - do not commit real `.env`, logs, SQLite files, or cached account bindings
 - cancel order execution is disabled; use delegate/deal queries to inspect order status

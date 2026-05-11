@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -17,6 +18,10 @@ except ImportError:
 load_env()
 
 
+DEFAULT_API_BASE_URL = "http://42.193.103.122:10288/admin-api"
+TRANSFER_API_PREFIX = "/paper-trading/api/v1"
+
+
 def print_json(payload: Any) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -28,15 +33,44 @@ def error_payload(message: str, *, code: str = "CLI_ERROR", data: Any | None = N
     return payload
 
 
+def is_platform_result(body: Any) -> bool:
+    return isinstance(body, dict) and {"code", "msg", "data"}.issubset(body.keys())
+
+
+def unwrap_platform_result(body: Any) -> Any:
+    """Convert transfer-service CommonResult back to the upstream skill shape."""
+    if not is_platform_result(body):
+        return body
+
+    if body.get("code") == 0:
+        return body.get("data")
+
+    raw_message = str(body.get("msg") or "").strip()
+    code = f"PLATFORM_{body.get('code')}"
+    message = raw_message or "paper trading transfer service returned an error"
+    match = re.match(r"^\[([A-Z0-9_]+)\]\s*(.*)$", raw_message)
+    if match:
+        code = match.group(1)
+        message = match.group(2) or raw_message
+    return error_payload(message, code=code, data=body.get("data"))
+
+
+def effective_user_id(args: argparse.Namespace) -> str:
+    return getattr(args, "user_id", None) or os.getenv("PAPER_TRADING_USER_ID", "local-user")
+
+
 class BackendClient:
     def __init__(self, user_id: str | None = None) -> None:
-        self.base_url = os.getenv("PAPER_TRADING_API_BASE_URL", "https://admin.deepseekdata.com").rstrip("/")
+        self.base_url = os.getenv("PAPER_TRADING_API_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
         self.timeout = int(os.getenv("PAPER_TRADING_API_TIMEOUT_SECONDS", "30"))
         self.user_id = user_id or os.getenv("PAPER_TRADING_USER_ID", "local-user")
         self.token = os.getenv("PAPER_TRADING_API_TOKEN", "").strip()
+        self.tenant_id = os.getenv("PAPER_TRADING_TENANT_ID", "1").strip()
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json", "X-User-Id": self.user_id}
+        if self.tenant_id:
+            headers["tenant-id"] = self.tenant_id
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
@@ -60,25 +94,26 @@ class BackendClient:
             body = {"success": False, "code": "NON_JSON_RESPONSE", "message": response.text}
         if response.status_code >= 400 and isinstance(body, dict):
             body.setdefault("httpStatus", response.status_code)
-        return body
+        return unwrap_platform_result(body)
 
 
 def common_payload(args: argparse.Namespace) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
+    payload: dict[str, Any] = {"userId": effective_user_id(args)}
     if getattr(args, "claw_token", None):
         payload["clawToken"] = args.claw_token
-    if getattr(args, "user_id", None):
-        payload["userId"] = args.user_id
     return payload
 
 
 def common_params(args: argparse.Namespace) -> dict[str, Any]:
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {"userId": effective_user_id(args)}
     if getattr(args, "claw_token", None):
         params["clawToken"] = args.claw_token
-    if getattr(args, "user_id", None):
-        params["userId"] = args.user_id
     return params
+
+
+def require_claw_token(args: argparse.Namespace, command_name: str) -> None:
+    if not getattr(args, "claw_token", None):
+        raise ValueError(f"{command_name} requires --claw-token. Get it from send-sms or status first.")
 
 
 def client(args: argparse.Namespace) -> BackendClient:
@@ -86,14 +121,16 @@ def client(args: argparse.Namespace) -> BackendClient:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    base = os.getenv("PAPER_TRADING_API_BASE_URL", "https://admin.deepseekdata.com").rstrip("/")
+    backend = BackendClient(user_id=getattr(args, "user_id", None))
+    base = backend.base_url
     data = {
         "apiBaseUrl": base,
-        "userId": getattr(args, "user_id", None) or os.getenv("PAPER_TRADING_USER_ID", "local-user"),
+        "tenantId": backend.tenant_id,
+        "userId": backend.user_id,
         "hasApiToken": bool(os.getenv("PAPER_TRADING_API_TOKEN", "").strip()),
     }
     try:
-        health = requests.get(base + "/health", timeout=10).json()
+        health = backend.request("GET", TRANSFER_API_PREFIX + "/health")
         data["health"] = health
     except Exception as exc:
         data["healthError"] = str(exc)
@@ -105,19 +142,21 @@ def cmd_send_sms(args: argparse.Namespace) -> None:
     payload.update({"phone": args.phone, "realName": args.real_name})
     if args.scene:
         payload["scene"] = args.scene
-    print_json(client(args).request("POST", "/api/v1/paper-trading/sms/send", payload=payload))
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/sms/send", payload=payload))
 
 
 def cmd_verify_code(args: argparse.Namespace) -> None:
+    require_claw_token(args, "verify-code")
     payload = common_payload(args)
     payload.update({"phone": args.phone, "code": args.code})
     if args.scene:
         payload["scene"] = args.scene
-    print_json(client(args).request("POST", "/api/v1/paper-trading/sms/verify", payload=payload))
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/sms/verify", payload=payload))
 
 
 def cmd_register(args: argparse.Namespace) -> None:
-    print_json(client(args).request("POST", "/api/v1/paper-trading/register", payload=common_payload(args)))
+    require_claw_token(args, "register")
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/register", payload=common_payload(args)))
 
 
 def cmd_get(args: argparse.Namespace, path: str) -> None:
@@ -127,37 +166,40 @@ def cmd_get(args: argparse.Namespace, path: str) -> None:
 def cmd_resolve_symbol(args: argparse.Namespace) -> None:
     payload = common_payload(args)
     payload["identifier"] = args.identifier
-    print_json(client(args).request("POST", "/api/v1/paper-trading/market/resolve-symbol", payload=payload))
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/market/resolve-symbol", payload=payload))
 
 
 def cmd_quote(args: argparse.Namespace) -> None:
     payload = common_payload(args)
     payload["identifier"] = args.identifier
-    print_json(client(args).request("POST", "/api/v1/paper-trading/market/quote", payload=payload))
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/market/quote", payload=payload))
 
 
 def cmd_resolve_inner_code(args: argparse.Namespace) -> None:
+    require_claw_token(args, "resolve-inner-code")
     payload = common_payload(args)
     payload["identifier"] = args.identifier
     if args.inner_code is not None:
         payload["innerCode"] = args.inner_code
-    print_json(client(args).request("POST", "/api/v1/paper-trading/inner-code/resolve", payload=payload))
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/inner-code/resolve", payload=payload))
 
 
 def cmd_seed_inner_code(args: argparse.Namespace) -> None:
+    require_claw_token(args, "seed-inner-code")
     payload = common_payload(args)
     payload.update({"stockCode": args.stock_code, "stockName": args.stock_name or "", "innerCode": args.inner_code})
-    print_json(client(args).request("POST", "/api/v1/paper-trading/inner-code/seed", payload=payload))
+    print_json(client(args).request("POST", TRANSFER_API_PREFIX + "/inner-code/seed", payload=payload))
 
 
 def cmd_order(args: argparse.Namespace, trade_type: str) -> None:
+    require_claw_token(args, trade_type)
     payload = common_payload(args)
     payload.update({"identifier": args.identifier, "quantity": args.quantity})
     if args.price is not None:
         payload["price"] = args.price
     if args.inner_code is not None:
         payload["innerCode"] = args.inner_code
-    path = "/api/v1/paper-trading/orders/buy" if trade_type == "buy" else "/api/v1/paper-trading/orders/sell"
+    path = TRANSFER_API_PREFIX + ("/orders/buy" if trade_type == "buy" else "/orders/sell")
     print_json(client(args).request("POST", path, payload=payload))
 
 
@@ -193,14 +235,14 @@ def build_parser() -> argparse.ArgumentParser:
     register.set_defaults(func=cmd_register)
 
     for command, path, help_text in (
-        ("status", "/api/v1/paper-trading/status", "查看绑定状态"),
-        ("account", "/api/v1/paper-trading/account", "查询账户"),
-        ("holdings", "/api/v1/paper-trading/holdings", "查询持仓"),
-        ("deals-today", "/api/v1/paper-trading/deals/today", "查询今日成交"),
-        ("deals-history", "/api/v1/paper-trading/deals/history", "查询历史成交"),
-        ("delegates-today", "/api/v1/paper-trading/delegates/today", "查询今日委托"),
-        ("delegates-history", "/api/v1/paper-trading/delegates/history", "查询历史委托"),
-        ("usage-report", "/api/v1/paper-trading/usage/report", "查看使用统计"),
+        ("status", TRANSFER_API_PREFIX + "/status", "查看绑定状态"),
+        ("account", TRANSFER_API_PREFIX + "/account", "查询账户"),
+        ("holdings", TRANSFER_API_PREFIX + "/holdings", "查询持仓"),
+        ("deals-today", TRANSFER_API_PREFIX + "/deals/today", "查询今日成交"),
+        ("deals-history", TRANSFER_API_PREFIX + "/deals/history", "查询历史成交"),
+        ("delegates-today", TRANSFER_API_PREFIX + "/delegates/today", "查询今日委托"),
+        ("delegates-history", TRANSFER_API_PREFIX + "/delegates/history", "查询历史委托"),
+        ("usage-report", TRANSFER_API_PREFIX + "/usage/report", "查看使用统计"),
     ):
         sub = subparsers.add_parser(command, help=help_text)
         add_common_options(sub)

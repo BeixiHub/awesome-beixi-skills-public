@@ -1,4 +1,0 @@
-interface:
-  display_name: "Paper Trading Claw"
-  short_description: "Call the Beixi paper-trading transfer API"
-  default_prompt: "Use $paper-trading-claw to check my paper-trading account status."

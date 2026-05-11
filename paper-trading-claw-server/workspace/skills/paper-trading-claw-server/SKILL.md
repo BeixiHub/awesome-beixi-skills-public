@@ -5,14 +5,15 @@ description: Client skill for OpenClaw/ArkClaw-compatible agents to use the Beix
 
 # Paper Trading Claw Skill
 
-这是给智能体使用的 A 股/ETF 模拟盘 skill。当前版本不在本地直连牛股王，也不在本地保存用户手机号、clawToken 或交易状态；所有注册、短信验证、账户查询、下单和用户数据持久化都通过后端 API 完成。
+这是给智能体使用的 A 股/ETF 模拟盘 skill。当前版本不在本地直连牛股王，也不在本地保存用户手机号、clawToken 或交易状态；所有注册、短信验证、账户查询、下单和用户数据持久化都通过模拟盘交易转接服务完成。
 
 ## 运行原则
 
-- 后端 API 是唯一可信状态源，用户绑定、短信会话、innerCode 缓存、交易审计都保存在服务端 SQLite 数据库。
+- 模拟盘交易转接服务是唯一 API 入口；用户绑定、短信会话、innerCode 缓存、交易审计都保存在服务端。
 - 不要直接调用牛股王接口，不要把火山短信 AK/SK 放进 skill 目录。
 - 手机号注册必须走 `send-sms -> verify-code -> register`。
 - 注册链路响应里如果出现 `mandatoryNotice`，必须把 `mandatoryNotice.text` 原样展示给用户，再继续后续操作。
+- `verify-code`、`register`、`resolve-inner-code`、`seed-inner-code`、`buy`、`sell` 必须传 `--claw-token`；token 来自 `send-sms` 或 `status` 返回。
 - 下单前必须确认用户已经完成绑定，且有可用的 `innerCode`。如果自动解析失败，要求用户提供 `innerCode` 或先查一次持仓/委托让后端回填。
 - 撤单功能已下线，不要向用户承诺可以撤单；需要查看订单状态时使用 `delegates-today` 和 `deals-today`。
 - 所有命令默认使用 `PAPER_TRADING_USER_ID`。上架到平台后，如果平台能提供真实用户 ID，必须通过 `--user-id` 传入，避免不同用户共享同一个测试 ID。
@@ -24,8 +25,9 @@ description: Client skill for OpenClaw/ArkClaw-compatible agents to use the Beix
 
 在本目录创建 `.env`，参考 `.env.example`：
 
-- `PAPER_TRADING_API_BASE_URL`: 后端地址，当前测试环境使用 `https://admin.deepseekdata.com`
-- `PAPER_TRADING_API_TOKEN`: 后端 API token，如果后端启用了鉴权必须配置
+- `PAPER_TRADING_API_BASE_URL`: 转接服务地址，当前环境使用 `http://42.193.103.122:10288/admin-api`
+- `PAPER_TRADING_TENANT_ID`: 平台租户 ID，当前环境使用 `1`
+- `PAPER_TRADING_API_TOKEN`: 可选；当前转接服务不需要 bearer token
 - `PAPER_TRADING_USER_ID`: 当前智能体用户 ID，默认 `local-user`；上架平台应覆盖为真实业务用户 ID
 
 ## 常用命令
@@ -73,20 +75,21 @@ python trading_service.py quote 000008 --user-id USER_001
 保存 innerCode：
 
 ```bash
-python trading_service.py seed-inner-code --user-id USER_001 --stock-code 000008 --stock-name 神州高铁 --inner-code 8
+python trading_service.py seed-inner-code --user-id USER_001 --claw-token pt_xxx --stock-code 000008 --stock-name 神州高铁 --inner-code 8
 ```
 
 买入、卖出：
 
 ```bash
-python trading_service.py buy 000008 --user-id USER_001 --quantity 100 --price 2.50 --inner-code 8
-python trading_service.py sell 000008 --user-id USER_001 --quantity 100 --price 2.60 --inner-code 8
+python trading_service.py buy 000008 --user-id USER_001 --claw-token pt_xxx --quantity 100 --price 2.50 --inner-code 8
+python trading_service.py sell 000008 --user-id USER_001 --claw-token pt_xxx --quantity 100 --price 2.60 --inner-code 8
 ```
 
 ## 智能体交互建议
 
 - 用户第一次使用时，先询问真实姓名和手机号，然后发送验证码。
 - `send-sms`、`verify-code`、`register` 的服务端响应会强制携带一段固定提示；展示给用户，不要改写。
+- `send-sms` 成功后保存本轮返回的 `clawToken`，后续 `verify-code` 和 `register` 都要传同一个 token。
 - 用户给出验证码后，调用 `verify-code`，成功后立即调用 `register`。
 - 后续交易不要再让用户重复手机号验证，直接用后端保存的绑定状态。
 - 下单前把标的、数量、价格、买卖方向复述给用户确认。

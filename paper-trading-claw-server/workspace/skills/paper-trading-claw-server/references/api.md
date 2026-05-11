@@ -1,18 +1,28 @@
 # API Contract
 
-当前测试后端地址：`https://admin.deepseekdata.com`
+当前转接服务地址：`http://42.193.103.122:10288/admin-api`
 
-所有业务接口都有两套路径：
+所有业务接口走平台转接路径：
 
-- `/api/v1/paper-trading/...`
-- `/api/paper-trading/...`
+- `/paper-trading/api/v1/...`
 
-如果后端设置了 `PAPER_TRADING_API_TOKEN`，请求必须带：
+请求必须带平台租户 header：
 
 ```http
-Authorization: Bearer <token>
-X-User-Id: <business-user-id>
+tenant-id: 1
 ```
+
+转接服务返回平台统一包装：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": {}
+}
+```
+
+客户端脚本会自动拆开该包装，并把 `data` 中的上游原始 JSON 输出给智能体。失败时，脚本会把 `[CANCEL_DISABLED] ...` 这类平台错误消息还原成原来的 `success=false/code/message` 结构。
 
 ## 注册绑定流程
 
@@ -23,7 +33,7 @@ X-User-Id: <business-user-id>
 发送短信：
 
 ```http
-POST /api/v1/paper-trading/sms/send
+POST /paper-trading/api/v1/sms/send
 {
   "userId": "USER_001",
   "phone": "13800138000",
@@ -49,7 +59,7 @@ POST /api/v1/paper-trading/sms/send
 校验验证码：
 
 ```http
-POST /api/v1/paper-trading/sms/verify
+POST /paper-trading/api/v1/sms/verify
 {
   "userId": "USER_001",
   "clawToken": "pt_xxx",
@@ -61,7 +71,7 @@ POST /api/v1/paper-trading/sms/verify
 注册牛股王模拟盘：
 
 ```http
-POST /api/v1/paper-trading/register
+POST /paper-trading/api/v1/register
 {
   "userId": "USER_001",
   "clawToken": "pt_xxx"
@@ -71,35 +81,35 @@ POST /api/v1/paper-trading/register
 查询状态：
 
 ```http
-GET /api/v1/paper-trading/status?clawToken=pt_xxx
+GET /paper-trading/api/v1/status?clawToken=pt_xxx
 ```
 
 ## 查询接口
 
 ```http
-GET /api/v1/paper-trading/account
-GET /api/v1/paper-trading/holdings
-GET /api/v1/paper-trading/deals/today
-GET /api/v1/paper-trading/deals/history
-GET /api/v1/paper-trading/delegates/today
-GET /api/v1/paper-trading/delegates/history
-GET /api/v1/paper-trading/usage/report
+GET /paper-trading/api/v1/account
+GET /paper-trading/api/v1/holdings
+GET /paper-trading/api/v1/deals/today
+GET /paper-trading/api/v1/deals/history
+GET /paper-trading/api/v1/delegates/today
+GET /paper-trading/api/v1/delegates/history
+GET /paper-trading/api/v1/usage/report
 ```
 
 ## 行情和 innerCode
 
 ```http
-POST /api/v1/paper-trading/market/resolve-symbol
+POST /paper-trading/api/v1/market/resolve-symbol
 { "identifier": "神州高铁" }
 
-POST /api/v1/paper-trading/market/quote
+POST /paper-trading/api/v1/market/quote
 { "identifier": "000008" }
 
-POST /api/v1/paper-trading/inner-code/resolve
-{ "identifier": "000008" }
+POST /paper-trading/api/v1/inner-code/resolve
+{ "userId": "USER_001", "clawToken": "pt_xxx", "identifier": "000008" }
 
-POST /api/v1/paper-trading/inner-code/seed
-{ "stockCode": "000008", "stockName": "神州高铁", "innerCode": 8 }
+POST /paper-trading/api/v1/inner-code/seed
+{ "userId": "USER_001", "clawToken": "pt_xxx", "stockCode": "000008", "stockName": "神州高铁", "innerCode": 8 }
 ```
 
 ## 交易接口
@@ -107,8 +117,10 @@ POST /api/v1/paper-trading/inner-code/seed
 买入：
 
 ```http
-POST /api/v1/paper-trading/orders/buy
+POST /paper-trading/api/v1/orders/buy
 {
+  "userId": "USER_001",
+  "clawToken": "pt_xxx",
   "identifier": "000008",
   "quantity": 100,
   "price": 2.50,
@@ -119,8 +131,10 @@ POST /api/v1/paper-trading/orders/buy
 卖出：
 
 ```http
-POST /api/v1/paper-trading/orders/sell
+POST /paper-trading/api/v1/orders/sell
 {
+  "userId": "USER_001",
+  "clawToken": "pt_xxx",
   "identifier": "000008",
   "quantity": 100,
   "price": 2.60,
@@ -131,6 +145,6 @@ POST /api/v1/paper-trading/orders/sell
 撤单功能已下线。旧路径保留用于兼容，但固定返回 `410 CANCEL_DISABLED`，不会再调用牛股王撤单接口。
 
 ```http
-POST /api/v1/paper-trading/orders/cancel
+POST /paper-trading/api/v1/orders/cancel
 { "delegateId": 10001 }
 ```
