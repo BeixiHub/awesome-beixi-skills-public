@@ -3,7 +3,7 @@ name: paper-trading-claw-server
 description: Client skill for OpenClaw/ArkClaw-compatible agents to use the Beixi Niuguwang A-share/ETF paper-trading API. Use when a user asks an agent to send SMS verification, verify a code, register or bind a paper-trading account, query account status, holdings, deals, delegates, usage, resolve stock symbols or innerCode, fetch quotes, or place virtual buy/sell orders. Do not use for real-money trading; cancel orders are disabled.
 ---
 
-# Paper Trading Claw Skill
+# Paper Trading Claw Server Skill
 
 这是给智能体使用的 A 股/ETF 模拟盘 skill。当前版本不在本地直连牛股王，也不在本地保存用户手机号、clawToken 或交易状态；所有注册、短信验证、账户查询、下单和用户数据持久化都通过模拟盘交易转接服务完成。
 

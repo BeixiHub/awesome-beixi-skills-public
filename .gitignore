@@ -3,7 +3,11 @@
 **/.env
 __pycache__/
 *.pyc
+.venv/
+venv/
+**/.venv/
+**/venv/
 **/state/inner_code_cache.json
 **/state/trade_audit_log.jsonl
-event-intelligence/workspace/skills/event-intelligence/state/push_config.json
-event-intelligence/workspace/skills/event-intelligence/state/push_history.json
+skills/event-intelligence/state/push_config.json
+skills/event-intelligence/state/push_history.json
