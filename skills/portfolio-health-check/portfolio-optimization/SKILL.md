@@ -1,6 +1,6 @@
 ---
 name: portfolio-optimization
-description: 收集约束后，通过运行 call_remote_phase_api.py 调用远端 Phase 3 API，默认输出优化处方 PDF、Markdown 和 JSON。
+description: 收集约束后，通过运行 call_remote_phase_api.py 调用远端 Phase 3 API，默认只交付优化处方 PDF；PDF 缺失时朗读 Markdown，最后才降级交付 JSON。
 ---
 
 # 投资组合优化处方
@@ -78,18 +78,19 @@ python call_remote_phase_api.py phase3 state/{run_id}/phase3_payload.json --outp
 
 ### 第 3 步：呈现结果
 
-脚本运行成功后，会自动生成两个文件：
+脚本运行成功后，会自动生成三个文件：
 - `state/{run_id}/phase3_result.json` — 完整结构化数据
 - `state/{run_id}/phase3_result.md` — 服务器端已格式化好的完整中文报告
 - `state/{run_id}/phase3_report.pdf` — 服务器端默认生成的 PDF 报告
 
-**直接读取 `state/{run_id}/phase3_result.md` 并逐字原样输出给用户。不要改写、删减、概括或重新组织内容。** 这份报告包含阅读指引、综合研判、配置建议、建议卡片（含前后对比表和压力测试）等完整内容，是最终成品。
+正常最终交付物只有：
+- `state/{run_id}/phase3_report.pdf` — 生成好的 Phase 3 优化处方 PDF
 
-如果 `.md` 文件不存在，降级从 JSON 的 `data.client_output.markdown` 字段读取并原样输出。
+不要主动交付 `phase3_result.json` 或 `phase3_result.md`。JSON 和 Markdown 都是降级材料，不是正常交付物。
 
-默认也要把 `phase3_report.pdf` 作为最终交付物提供给用户；如果 PDF 文件缺失，再只交付 Markdown/JSON 并说明降级原因。
+如果 `phase3_report.pdf` 缺失，第一降级方式是读取 `state/{run_id}/phase3_result.md`，并在聊天中逐字原样朗读/输出给用户；不要改写、删减、概括或重新组织内容。如果内容过长，就分段连续原样输出，直到完整输出；不要因为内容较长改发 JSON。
 
-不要把原始 JSON 贴给用户。
+如果 `phase3_result.md` 也缺失，最终降级方式才是把 `state/{run_id}/phase3_result.json` 文件发给用户，并说明 PDF 和 Markdown 都未生成。
 
 ### 第 4 步：收口
 
