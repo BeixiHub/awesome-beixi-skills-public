@@ -197,16 +197,14 @@ class QVerisClient:
     def _match_tool_id(
         tools: List[Dict[str, Any]], exact_tool_id: str, tool_prefix: str = ""
     ) -> str:
+        prefix_match = ""
         for tool in tools:
             tool_id = tool.get("tool_id", "")
             if tool_id == exact_tool_id:
                 return tool_id
-        if tool_prefix:
-            for tool in tools:
-                tool_id = tool.get("tool_id", "")
-                if tool_id.startswith(tool_prefix):
-                    return tool_id
-        return ""
+            if not prefix_match and tool_prefix and tool_id.startswith(tool_prefix):
+                prefix_match = tool_id
+        return prefix_match
 
     def _run_tool(
         self,
@@ -361,6 +359,7 @@ class QVerisClient:
             "string",
             "int",
             "integer",
+            "varchar",
             "double",
             "float",
             "date",
@@ -369,22 +368,33 @@ class QVerisClient:
         }
         values = [str(value).strip().lower() for value in row.values()]
         marker_count = sum(1 for value in values if value in type_markers)
-        return marker_count >= 3 and marker_count >= len(values) * 0.8
+        return marker_count >= 2 and marker_count >= len(values) * 0.8
 
     @staticmethod
     def _looks_like_label_row(ticker: Any, name: Any, industry: Any) -> bool:
-        labels = {"股票代码", "股票名称", "所属申万行业", "所属证监会行业", "所属中信行业"}
+        labels = {
+            "股票代码",
+            "股票名称",
+            "所属申万行业",
+            "所属证监会行业",
+            "所属中信行业",
+            "Stock Code",
+            "Stock Name",
+            "Industry",
+            "Company Name",
+        }
         values = {str(value).strip() for value in (ticker, name, industry) if value}
         return bool(values) and values.issubset(labels)
 
-    def _walk_dicts(self, value: Any) -> Iterable[Dict[str, Any]]:
+    @staticmethod
+    def _walk_dicts(value: Any) -> Iterable[Dict[str, Any]]:
         if isinstance(value, dict):
             yield value
             for child in value.values():
-                yield from self._walk_dicts(child)
+                yield from QVerisClient._walk_dicts(child)
         elif isinstance(value, list):
             for child in value:
-                yield from self._walk_dicts(child)
+                yield from QVerisClient._walk_dicts(child)
 
     _FULL_CODE_PATTERN = re.compile(r"^(\d{6})\.([A-Z]{2})$")
     _BARE_CODE_PATTERN = re.compile(r"^\d{6}$")
