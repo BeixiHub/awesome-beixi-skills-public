@@ -23,7 +23,10 @@ load_credentials()
 # forwards to the Python portfolio_api; clients never reference that backend
 # IP directly. Override with PORTFOLIO_API_BASE_URL only for local dev.
 DEFAULT_BASE_URL = "https://admin.deepseekdata.com"
-API_PATH_PREFIX = "/admin-api/aireport2/portfolio-health"
+API_PATH_PREFIX = os.getenv(
+    "PORTFOLIO_API_PATH_PREFIX",
+    "/admin-api/aireport2/portfolio-health",
+).strip().rstrip("/")
 
 # Yudao is multi-tenant. Every request must carry a `tenant-id` header or the
 # platform's tenant filter refuses with
@@ -467,6 +470,61 @@ def _extract_client_markdown(result: dict, json_path: Path) -> Path | None:
     return md_path
 
 
+def _decode_base64_artifact(
+    artifact: dict,
+    *,
+    label: str,
+    expected_prefix: bytes | None = None,
+) -> bytes:
+    encoded = artifact.get("base64", "")
+    if not encoded:
+        raise SystemExit(f"phase3 artifact {label} is missing base64 content")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise SystemExit(f"phase3 artifact {label} returned invalid base64") from exc
+    if expected_prefix and not data.startswith(expected_prefix):
+        raise SystemExit(f"phase3 artifact {label} has unexpected file bytes")
+    return data
+
+
+def _extract_phase3_artifacts(
+    result: dict,
+    json_path: Path,
+    raw_response_text: str,
+) -> dict[str, str]:
+    """Save downloadable Phase 3 artifacts returned by the server."""
+    raw_response_path = json_path.with_suffix(".response.json")
+    raw_response_path.write_text(raw_response_text.rstrip("\n") + "\n", encoding="utf-8")
+    saved: dict[str, str] = {"raw_response_file": str(raw_response_path)}
+
+    artifacts = result.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return saved
+
+    pdf_artifact = artifacts.get("optimization_pdf")
+    if isinstance(pdf_artifact, dict):
+        pdf_bytes = _decode_base64_artifact(
+            pdf_artifact,
+            label="optimization_pdf",
+            expected_prefix=b"%PDF",
+        )
+        pdf_path = json_path.with_name("phase3_report.pdf")
+        pdf_path.write_bytes(pdf_bytes)
+        saved["pdf_file"] = str(pdf_path)
+
+    json_artifact = artifacts.get("optimization_json")
+    if isinstance(json_artifact, dict):
+        json_bytes = _decode_base64_artifact(
+            json_artifact,
+            label="optimization_json",
+        )
+        json_path.write_bytes(json_bytes)
+        saved["json_file"] = str(json_path)
+
+    return saved
+
+
 def _build_result_summary(result: dict, phase: str, output_file: str) -> dict:
     """Extract key fields from a phase result for stdout confirmation."""
     summary: dict = {
@@ -579,6 +637,7 @@ def main() -> int:
                 md_path = _extract_client_markdown(result, output_path)
                 if md_path:
                     summary["markdown_file"] = str(md_path)
+                summary.update(_extract_phase3_artifacts(result, output_path, rendered))
             sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
         else:
             sys.stdout.write(rendered + "\n")

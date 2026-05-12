@@ -80,7 +80,7 @@ Skill 通过 `call_remote_phase_api.py` 脚本统一调用 Phase 2 / Phase 3 远
 |----------|---------|---------|
 | `phase2` | `POST /admin-api/aireport2/portfolio-health/phase-2/deep-diagnosis` | JSON |
 | `phase2_pdf` | `POST /admin-api/aireport2/portfolio-health/phase-2/deep-diagnosis/pdf` | PDF（`application/pdf`） |
-| `phase3` | `POST /admin-api/aireport2/portfolio-health/phase-3/optimization` | JSON |
+| `phase3` | `POST /admin-api/aireport2/portfolio-health/phase-3/optimization` | JSON（默认含 PDF/JSON artifacts） |
 
 ### `call_remote_phase_api.py` 内部执行模型
 
@@ -101,7 +101,7 @@ python call_remote_phase_api.py <phase> <payload_file> [--output <path>] [--base
 |------|------|
 | `phase` | `phase2` \| `phase2_pdf` \| `phase3` |
 | `payload_file` | JSON payload 文件路径 |
-| `--output` | 可选，输出文件路径。`phase2`/`phase3` 写 JSON，`phase2_pdf` 写 PDF 二进制 |
+| `--output` | 可选，输出文件路径。`phase2` 写 JSON，`phase2_pdf` 写 PDF 二进制，`phase3` 写 JSON 并在同目录保存 `phase3_result.md` 和默认 PDF `phase3_report.pdf` |
 | `--base-url` | 可选，Java 网关基地址 |
 | `--api-key` | 可选，OpenAPI key；默认读取 `PORTFOLIO_API_KEY` |
 | `--tenant-id` | 可选，多租户 id；默认读取 `PORTFOLIO_API_TENANT_ID` |
@@ -137,6 +137,7 @@ python call_remote_phase_api.py phase2 state/phase2_payload.json --output state/
 
 # Phase 3 — 优化处方
 python call_remote_phase_api.py phase3 state/phase3_payload.json --output state/phase3_result.json --api-key "$PORTFOLIO_API_KEY"
+# 输出：state/phase3_result.json + state/phase3_result.md + state/phase3_report.pdf
 ```
 
 ---
@@ -396,6 +397,18 @@ Phase 3 成功响应结构如下：
       "stress_test_executed": true,
       "warnings": []
     }
+  },
+  "artifacts": {
+    "optimization_pdf": {
+      "filename": "optimization_report.pdf",
+      "content_type": "application/pdf",
+      "base64": "..."
+    },
+    "optimization_json": {
+      "filename": "optimization_result.json",
+      "content_type": "application/json",
+      "base64": "..."
+    }
   }
 }
 ```
@@ -405,6 +418,7 @@ Phase 3 成功响应结构如下：
 - `data.client_output` 是面向用户展示的结构化文本，呈现方式同 Phase 2（优先 `markdown`，否则 `sections` + `tables` 组装）
 - `data.execution_info.warnings` 非空时需向用户展示警告
 - 若 `rescore_executed` 或 `stress_test_executed` 为 `false`，通常因 `_internal` 缺失导致降级
+- Phase 3 默认返回 `artifacts.optimization_pdf.base64`，客户端解码后保存为 `phase3_report.pdf`；`artifacts.optimization_json.base64` 解码后覆盖 `phase3_result.json`
 
 失败时：
 
@@ -431,8 +445,8 @@ Phase 2（远端 API）
   输出：state/phase2_report.pdf + state/phase2_result.json
 
 Phase 3（远端 API）
-  phase2_result.json（完整）+ constraints → call_remote_phase_api.py phase3 → JSON
-  输出：state/phase3_result.json
+  phase2_result.json（完整）+ constraints → call_remote_phase_api.py phase3 → JSON + PDF artifact
+  输出：state/phase3_result.json + state/phase3_result.md + state/phase3_report.pdf
 ```
 
 ### 快捷流程

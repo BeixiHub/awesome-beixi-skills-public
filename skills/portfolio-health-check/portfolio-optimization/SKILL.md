@@ -1,6 +1,6 @@
 ---
 name: portfolio-optimization
-description: 收集约束后，通过运行 call_remote_phase_api.py 调用远端 Phase 3 API，输出优化处方。
+description: 收集约束后，通过运行 call_remote_phase_api.py 调用远端 Phase 3 API，默认输出优化处方 PDF、Markdown 和 JSON。
 ---
 
 # 投资组合优化处方
@@ -81,10 +81,13 @@ python call_remote_phase_api.py phase3 state/{run_id}/phase3_payload.json --outp
 脚本运行成功后，会自动生成两个文件：
 - `state/{run_id}/phase3_result.json` — 完整结构化数据
 - `state/{run_id}/phase3_result.md` — 服务器端已格式化好的完整中文报告
+- `state/{run_id}/phase3_report.pdf` — 服务器端默认生成的 PDF 报告
 
 **直接读取 `state/{run_id}/phase3_result.md` 并逐字原样输出给用户。不要改写、删减、概括或重新组织内容。** 这份报告包含阅读指引、综合研判、配置建议、建议卡片（含前后对比表和压力测试）等完整内容，是最终成品。
 
 如果 `.md` 文件不存在，降级从 JSON 的 `data.client_output.markdown` 字段读取并原样输出。
+
+默认也要把 `phase3_report.pdf` 作为最终交付物提供给用户；如果 PDF 文件缺失，再只交付 Markdown/JSON 并说明降级原因。
 
 不要把原始 JSON 贴给用户。
 

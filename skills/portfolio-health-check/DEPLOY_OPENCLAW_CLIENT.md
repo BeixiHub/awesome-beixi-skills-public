@@ -80,6 +80,7 @@ OpenClaw 客户端不再本地执行：
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `PORTFOLIO_API_BASE_URL` | API 网关地址 | `https://admin.deepseekdata.com` |
+| `PORTFOLIO_API_PATH_PREFIX` | API 路径前缀（仅本地直连 Python API 时覆盖） | `/admin-api/aireport2/portfolio-health` |
 | `PORTFOLIO_API_TENANT_ID` | 多租户 id | `1` |
 | `PHC_CREDENTIALS_PATH` | 凭证文件路径覆盖 | `~/.config/portfolio-health-check/credentials.env` |
 
@@ -98,6 +99,8 @@ python call_remote_phase_api.py phase2 /tmp/portfolio_payload.json --output /tmp
 cd ~/.openclaw/workspace/skills/portfolio-health-check && \
 python call_remote_phase_api.py phase2_pdf /tmp/portfolio_payload.json --output /tmp/portfolio_output/diagnosis_report.pdf
 ```
+
+Phase 3 默认由服务端返回 PDF artifact；客户端仍调用 `phase3`，桥接脚本会把 JSON 写到 `--output` 指定路径，并在同目录解码保存 `phase3_report.pdf`：
 
 ```bash
 cd ~/.openclaw/workspace/skills/portfolio-health-check && \

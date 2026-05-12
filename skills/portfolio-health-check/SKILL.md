@@ -126,7 +126,7 @@ chmod 600 "$CRED_PATH"
   ← constraints{用户约束}
   → 写入: state/{run_id}/phase3_payload.json
   → 运行: python call_remote_phase_api.py phase3 state/{run_id}/phase3_payload.json --output state/{run_id}/phase3_result.json
-  → 输出: state/{run_id}/phase3_result.json
+  → 输出: state/{run_id}/phase3_result.json + phase3_result.md + phase3_report.pdf（Phase 3 默认生成 PDF）
 ```
 
 `state/{run_id}/` 下的文件都是当前咨询的临时状态，咨询结束时统一清理整个目录。
