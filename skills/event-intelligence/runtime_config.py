@@ -5,7 +5,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-QVERIS_ENV_KEYS = ("QVERIS_TOKEN", "QVERIS_API_TOKEN")
+EVENT_API_ENV_KEYS = ("EVENT_INTEL_API_KEY", "DEEPSEEKDATA_API_KEY")
+EVENT_API_CONFIG_KEYS = (
+    "event_intel_api_key",
+    "api_key",
+    "deepseekdata_api_key",
+)
 
 
 def skill_dir() -> Path:
@@ -199,15 +204,18 @@ def load_openclaw_feishu_config() -> dict[str, Any]:
     return found
 
 
-def qveris_token_from_config(runtime_config: dict[str, Any] | None = None) -> str:
+def event_api_key_from_config(runtime_config: dict[str, Any] | None = None) -> str:
     raw = runtime_config
     if raw is None:
         path = push_config_path()
         raw = read_json(path) if path.exists() else None
     if not isinstance(raw, dict):
         return ""
-    token = raw.get("qveris_token") or raw.get("qveris_api_token") or ""
-    return token.strip() if isinstance(token, str) else ""
+    for key in EVENT_API_CONFIG_KEYS:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _token_from_env_value(value: Any) -> str:
@@ -217,17 +225,17 @@ def _token_from_env_value(value: Any) -> str:
             return ""
         if "=" in text:
             key, raw_token = text.split("=", 1)
-            if key.strip() in QVERIS_ENV_KEYS:
+            if key.strip() in EVENT_API_ENV_KEYS:
                 return raw_token.strip().strip('"').strip("'")
         return ""
 
     if isinstance(value, dict):
-        for key in QVERIS_ENV_KEYS:
+        for key in EVENT_API_ENV_KEYS:
             token = value.get(key)
             if isinstance(token, str) and token.strip():
                 return token.strip()
         name = str(value.get("name", "") or value.get("key", "") or "").strip()
-        if name in QVERIS_ENV_KEYS:
+        if name in EVENT_API_ENV_KEYS:
             token = value.get("value")
             if isinstance(token, str) and token.strip():
                 return token.strip()
@@ -245,47 +253,49 @@ def _token_from_env_value(value: Any) -> str:
     return ""
 
 
-def find_openclaw_qveris_token(value: Any) -> str:
+def find_openclaw_event_api_key(value: Any) -> str:
     if isinstance(value, dict):
         env_token = _token_from_env_value(value.get("env"))
         if env_token:
             return env_token
-        for key in (*QVERIS_ENV_KEYS, "qveris_token", "qveris_api_token"):
-            token = value.get(key)
-            if isinstance(token, str) and token.strip():
-                return token.strip()
+        for key, raw_value in value.items():
+            key_norm = normalize_key(key)
+            if key_norm in {normalize_key(item) for item in (*EVENT_API_ENV_KEYS, *EVENT_API_CONFIG_KEYS)}:
+                token = as_nonempty_str(raw_value)
+                if token:
+                    return token
         for child in value.values():
-            token = find_openclaw_qveris_token(child)
+            token = find_openclaw_event_api_key(child)
             if token:
                 return token
     elif isinstance(value, list):
         for item in value:
-            token = find_openclaw_qveris_token(item)
+            token = find_openclaw_event_api_key(item)
             if token:
                 return token
     return ""
 
 
-def qveris_token_from_openclaw_config() -> str:
+def event_api_key_from_openclaw_config() -> str:
     for path in workspace_openclaw_config_paths():
         if not path.exists():
             continue
-        token = find_openclaw_qveris_token(read_json(path))
+        token = find_openclaw_event_api_key(read_json(path))
         if token:
             return token
     return ""
 
 
-def resolve_qveris_token(runtime_config: dict[str, Any] | None = None) -> str:
-    """Resolve QVeris token in one documented order.
+def resolve_event_api_key(runtime_config: dict[str, Any] | None = None) -> str:
+    """Resolve deepseekdata event API key in the documented order.
 
     Priority: OpenClaw config, runtime push_config, then process environment.
     """
     for token in (
-        qveris_token_from_openclaw_config(),
-        qveris_token_from_config(runtime_config),
-        os.getenv("QVERIS_TOKEN", "").strip(),
-        os.getenv("QVERIS_API_TOKEN", "").strip(),
+        event_api_key_from_openclaw_config(),
+        event_api_key_from_config(runtime_config),
+        os.getenv("EVENT_INTEL_API_KEY", "").strip(),
+        os.getenv("DEEPSEEKDATA_API_KEY", "").strip(),
     ):
         if token:
             return token

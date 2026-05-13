@@ -9,7 +9,7 @@
   "feishu_webhooks": [],
   "feishu_receive_id": "",
   "feishu_receive_id_type": "chat_id",
-  "qveris_token": "",
+  "event_intel_api_key": "",
   "history_file": "state/push_history.json",
   "last_push_time": ""
 }

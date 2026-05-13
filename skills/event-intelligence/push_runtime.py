@@ -20,7 +20,7 @@ import event_query as _event_query
 from event_query import daily_event_summary_many, search_events
 from runtime_config import (
     load_openclaw_feishu_config,
-    resolve_qveris_token,
+    resolve_event_api_key,
     split_env_values,
 )
 
@@ -260,7 +260,7 @@ def default_runtime_config() -> dict[str, Any]:
         "feishu_webhooks": [],
         "feishu_receive_id": "",
         "feishu_receive_id_type": "chat_id",
-        "qveris_token": "",
+        "event_intel_api_key": "",
         "history_file": "state/push_history.json",
         "last_push_time": "",
     }
@@ -270,6 +270,9 @@ def normalize_runtime_config(raw: Any) -> dict[str, Any]:
     cfg = default_runtime_config()
     if isinstance(raw, dict):
         for key in cfg:
+            if key in raw:
+                cfg[key] = raw[key]
+        for key in ("api_key", "deepseekdata_api_key"):
             if key in raw:
                 cfg[key] = raw[key]
         if not split_keywords(raw.get("keywords")) and "keyword" in raw:
@@ -297,8 +300,11 @@ def normalize_runtime_config(raw: Any) -> dict[str, Any]:
     task_name = str(cfg.get("task_name", DEFAULT_TASK_NAME) or DEFAULT_TASK_NAME).strip()
     cfg["task_name"] = task_name or DEFAULT_TASK_NAME
 
-    token = str(cfg.get("qveris_token", "") or "").strip()
-    cfg["qveris_token"] = token
+    api_key = str(cfg.get("event_intel_api_key", "") or "").strip()
+    cfg["event_intel_api_key"] = api_key
+    for key in ("api_key", "deepseekdata_api_key"):
+        if key in cfg:
+            cfg[key] = str(cfg.get(key, "") or "").strip()
 
     history_file = str(cfg.get("history_file", "state/push_history.json") or "").strip()
     cfg["history_file"] = history_file or "state/push_history.json"
@@ -336,21 +342,22 @@ def load_runtime_config() -> dict[str, Any]:
     return normalize_runtime_config(raw)
 
 
-def apply_runtime_qveris_token(cfg: dict[str, Any], *, reset_client: bool = False) -> None:
-    token = resolve_qveris_token(cfg)
-    if not token:
+def apply_runtime_event_api_key(cfg: dict[str, Any], *, reset_client: bool = False) -> None:
+    api_key = resolve_event_api_key(cfg)
+    if not api_key:
         return
-    previous = os.getenv("QVERIS_TOKEN", "")
-    os.environ["QVERIS_TOKEN"] = token
-    if reset_client or previous != token:
-        _event_query.reset_qveris_client()
+    previous = os.getenv("EVENT_INTEL_API_KEY", "")
+    os.environ["EVENT_INTEL_API_KEY"] = api_key
+    reset = getattr(_event_query, "reset_event_api_client", None)
+    if callable(reset) and (reset_client or previous != api_key):
+        reset()
 
 
 def load_and_persist_runtime_config() -> dict[str, Any]:
     """Load config, apply schema/default normalization, then write it back."""
     cfg = load_runtime_config()
     save_json(PUSH_CONFIG_PATH, cfg)
-    apply_runtime_qveris_token(cfg, reset_client=True)
+    apply_runtime_event_api_key(cfg, reset_client=True)
     return cfg
 
 
@@ -738,30 +745,30 @@ def feishu_config_diagnostic(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def has_qveris_token(cfg: dict[str, Any]) -> bool:
-    return bool(resolve_qveris_token(cfg))
+def has_event_api_key(cfg: dict[str, Any]) -> bool:
+    return bool(resolve_event_api_key(cfg))
 
 
-def qveris_missing_message() -> str:
+def event_api_key_missing_message() -> str:
     return (
-        "缺少 Qveris token。请先让用户提供 token，然后配置到 OpenClaw；"
-        "如果是本地部署，也可以通过 stdin 或 --token-file 保存到运行时配置。"
+        "缺少 deepseekdata API key。请先让用户提供 key，然后配置到 OpenClaw；"
+        "如果是本地部署，也可以通过 stdin 或 --key-file 保存到运行时配置。"
     )
 
 
-def set_qveris_token(token: str) -> dict[str, Any]:
-    cleaned = token.strip()
+def set_event_api_key(api_key: str) -> dict[str, Any]:
+    cleaned = api_key.strip()
     if not cleaned:
-        raise RuntimeError("Qveris token 不能为空。")
+        raise RuntimeError("deepseekdata API key 不能为空。")
     cfg = load_runtime_config()
-    cfg["qveris_token"] = cleaned
+    cfg["event_intel_api_key"] = cleaned
     save_json(PUSH_CONFIG_PATH, cfg)
-    apply_runtime_qveris_token(cfg, reset_client=True)
+    apply_runtime_event_api_key(cfg, reset_client=True)
     return {
         "status": "ok",
-        "message": "已保存 Qveris token。",
+        "message": "已保存 deepseekdata API key。",
         "path": str(PUSH_CONFIG_PATH),
-        "qveris_has_token": True,
+        "event_api_has_key": True,
     }
 
 
@@ -1067,8 +1074,8 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "run_time": history["last_run_time"],
         }
 
-    if not has_qveris_token(cfg):
-        raise RuntimeError(qveris_missing_message())
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
 
     if not has_feishu_target(cfg) and not dry_run:
         raise RuntimeError(feishu_missing_target_message(cfg))
@@ -1170,7 +1177,7 @@ def manual_push(
     no_feishu: bool = False,
 ) -> dict[str, Any]:
     cfg = load_runtime_config()
-    apply_runtime_qveris_token(cfg, reset_client=True)
+    apply_runtime_event_api_key(cfg, reset_client=True)
     retention_days = cfg["retention_days"]
     history = load_history(retention_days=retention_days)
     prune_history(history, retention_days=retention_days)
@@ -1184,8 +1191,8 @@ def manual_push(
     resolved_page_size = page_size if page_size and page_size > 0 else cfg["page_size"]
     resolved_page_size = max(1, min(int(resolved_page_size), 30))
 
-    if not has_qveris_token(cfg):
-        raise RuntimeError(qveris_missing_message())
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
 
     if not no_feishu and not dry_run and not has_feishu_target(cfg):
         raise RuntimeError(feishu_missing_target_message(cfg))
@@ -1276,8 +1283,8 @@ def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "message": "运行时推送未开启，本次未执行每日统计。",
         }
 
-    if not has_qveris_token(cfg):
-        raise RuntimeError(qveris_missing_message())
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
 
     if not has_feishu_target(cfg) and not dry_run:
         raise RuntimeError(feishu_missing_target_message(cfg))
@@ -1428,10 +1435,9 @@ def uninstall_schedule(task_name: str | None = None) -> dict[str, Any]:
 
 def redacted_runtime_config(cfg: dict[str, Any]) -> dict[str, Any]:
     safe_cfg = dict(cfg)
-    if str(safe_cfg.get("qveris_token", "") or "").strip():
-        safe_cfg["qveris_token"] = "<redacted>"
-    if str(safe_cfg.get("qveris_api_token", "") or "").strip():
-        safe_cfg["qveris_api_token"] = "<redacted>"
+    for key in ("event_intel_api_key", "api_key", "deepseekdata_api_key"):
+        if str(safe_cfg.get(key, "") or "").strip():
+            safe_cfg[key] = "<redacted>"
     webhooks = safe_cfg.get("feishu_webhooks")
     if isinstance(webhooks, list):
         safe_cfg["feishu_webhooks"] = ["<redacted>" for item in webhooks if str(item or "").strip()]
@@ -1453,9 +1459,14 @@ def status() -> dict[str, Any]:
         "message": schedule_hint_message("运行时状态如下。", cfg["schedule"]),
         "push_config": safe_cfg,
         "feishu": feishu_config_diagnostic(cfg),
-        "qveris": {
-            "has_token": has_qveris_token(cfg),
-            "stored_in_config": bool(str(cfg.get("qveris_token", "") or "").strip()),
+        "event_api": {
+            "has_key": has_event_api_key(cfg),
+            "stored_in_config": bool(
+                str(cfg.get("event_intel_api_key", "") or "").strip()
+                or str(cfg.get("api_key", "") or "").strip()
+                or str(cfg.get("deepseekdata_api_key", "") or "").strip()
+            ),
+            "endpoint": "https://admin.deepseekdata.com",
         },
         "history": {
             "batches": len(history.get("batches", [])),
@@ -1576,12 +1587,12 @@ def cmd_run_daily(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_set_qveris_token(args: argparse.Namespace) -> int:
-    if args.token_file:
-        token = read_secret_file(args.token_file)
+def cmd_set_event_api_key(args: argparse.Namespace) -> int:
+    if args.key_file:
+        api_key = read_secret_file(args.key_file)
     else:
-        token = sys.stdin.read().strip() if args.token == "-" else args.token
-    result = set_qveris_token(token)
+        api_key = sys.stdin.read().strip() if args.key == "-" else args.key
+    result = set_event_api_key(api_key)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -1729,11 +1740,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_daily_parser.add_argument("--quiet", action="store_true")
     run_daily_parser.set_defaults(func=cmd_run_daily)
 
-    token_parser = sub.add_parser("set-qveris-token", help="保存 Qveris token 到运行时配置")
-    token_source = token_parser.add_mutually_exclusive_group(required=True)
-    token_source.add_argument("--token", help="Token 值；传 '-' 表示从 stdin 读取")
-    token_source.add_argument("--token-file", help="从本地文件读取 token")
-    token_parser.set_defaults(func=cmd_set_qveris_token)
+    key_parser = sub.add_parser("set-api-key", help="保存 deepseekdata API key 到运行时配置")
+    key_source = key_parser.add_mutually_exclusive_group(required=True)
+    key_source.add_argument("--key", help="API key 值；传 '-' 表示从 stdin 读取")
+    key_source.add_argument("--key-file", help="从本地文件读取 API key")
+    key_parser.set_defaults(func=cmd_set_event_api_key)
 
     configure_parser = sub.add_parser("configure", help="保存运行时推送配置")
     active_group = configure_parser.add_mutually_exclusive_group()

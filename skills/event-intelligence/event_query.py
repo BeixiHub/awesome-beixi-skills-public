@@ -3,119 +3,67 @@
 - search_events(keyword, minutes, ...): 批量检索事件摘要
 - get_event_detail(keyword, event_id): 获取单个事件详情
 
-底层通过 Qveris 平台调用 deepseekdata 语义事件检索工具，无需本地
-持有 deepseekdata API Key，只需设置 QVERIS_TOKEN 环境变量。
+底层直连 deepseekdata 语义事件检索 API。
 """
 
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import re
-from threading import Lock
-from typing import Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-from qveris_client import QVerisClient
+from runtime_config import resolve_event_api_key
 
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
 MAX_KEYWORDS = 3
-
-# Qveris 上 deepseekdata 事件语义检索工具的固定 ID。
-# 若该 tool 被重命名或下线，首次 search 时会显式报错指出。
-QVERIS_TOOL_ID = "deepseekdata.event_analysis.events.list.v1.32c03d20"
-
-# 实测单响应 ~155KB，设 300KB 留 ~2x 余量防 schema 扩展。
-_MAX_RESP = 300_000
-
-_client_singleton: Optional[QVerisClient] = None
-# 进程生命周期内复用 search_id；进程重启会重新获取。
-_search_id_cache: Optional[str] = None
-_client_lock = Lock()
-_search_id_lock = Lock()
+EVENT_LIST_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
+DEFAULT_TIMEOUT = 60
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+MAX_ERROR_BODY_BYTES = 4096
 
 
-def _get_client() -> QVerisClient:
-    global _client_singleton
-    if _client_singleton is None:
-        with _client_lock:
-            if _client_singleton is None:
-                _client_singleton = QVerisClient()
-    return _client_singleton
-
-
-def reset_qveris_client() -> None:
-    global _client_singleton, _search_id_cache
-    with _client_lock:
-        _client_singleton = None
-    with _search_id_lock:
-        _search_id_cache = None
-
-
-def _ensure_search_id(client: QVerisClient) -> str:
-    global _search_id_cache
-    if _search_id_cache:
-        return _search_id_cache
-    with _search_id_lock:
-        if _search_id_cache:
-            return _search_id_cache
-        result = client.search_tools(
-            query="deepseekdata semantic event list financial industry",
-            limit=10,
-        )
-        # Qveris /search doesn't return a `success` flag — the presence of
-        # `search_id` is the only reliable success indicator. Validate shape
-        # before indexing so we emit a clear diagnostic instead of a KeyError.
-        search_id = result.get("search_id") if isinstance(result, dict) else None
-        if not isinstance(search_id, str) or not search_id:
-            raise RuntimeError(
-                f"Qveris 工具搜索返回结构异常：{json.dumps(result, ensure_ascii=False)[:300]}"
-            )
-        tool_ids = [t.get("tool_id") for t in result.get("results", [])]
-        if QVERIS_TOOL_ID not in tool_ids:
-            raise RuntimeError(
-                f"Qveris 搜索结果中未找到预期工具 {QVERIS_TOOL_ID}。"
-                f"实际返回工具：{tool_ids}。请确认工具是否被移除或重命名。"
-            )
-        _search_id_cache = search_id
-        return _search_id_cache
+def reset_event_api_client() -> None:
+    """Compatibility hook for runtime key updates; urllib has no client cache."""
+    return None
 
 
 def _request(params: dict) -> dict:
-    client = _get_client()
-    envelope = client.execute_tool(
-        tool_id=QVERIS_TOOL_ID,
-        search_id=_ensure_search_id(client),
-        parameters=params,
-        max_response_size=_MAX_RESP,
+    api_key = resolve_event_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "缺少 deepseekdata API key。请先通过 OpenClaw、运行时配置或 "
+            "EVENT_INTEL_API_KEY/DEEPSEEKDATA_API_KEY 环境变量提供。"
+        )
+
+    request = Request(
+        f"{EVENT_LIST_URL}?{urlencode(params)}",
+        headers={"X-API-Key": api_key, "tenant-id": "1"},
+        method="GET",
     )
-    if not envelope.get("success"):
-        raise RuntimeError(f"Qveris 工具执行失败：{envelope}")
-
-    result = envelope.get("result", {})
-    if not isinstance(result, dict):
-        raise RuntimeError(
-            f"Qveris 返回结果类型异常：{type(result).__name__}"
+    try:
+        with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
+            raw_bytes = response.read(MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        body = (
+            exc.read(MAX_ERROR_BODY_BYTES).decode("utf-8", errors="replace")
+            if exc.fp
+            else ""
         )
+        raise RuntimeError(f"deepseekdata HTTP 错误 {exc.code}：{body or exc.reason}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"deepseekdata 请求失败：{exc.reason}") from exc
 
-    # Broker 层故障：upstream HTTP 非 200 或 result.error 不为空。
-    # 要在尝试解包 data 之前拦截，否则错误会被后面的 shape check 吞掉，诊断变模糊。
-    upstream_status = result.get("status_code")
-    if upstream_status is not None and upstream_status != 200:
-        raise RuntimeError(
-            f"Qveris broker 上游 HTTP 错误 {upstream_status}："
-            f"{result.get('message') or result.get('error')}"
-        )
-    if result.get("error"):
-        raise RuntimeError(f"Qveris broker 错误：{result.get('error')}")
-
-    # 正常路径：result.data 直接是 deepseekdata 原始响应 {code, msg, data: {list, total}}
-    raw = result.get("data")
-    # 截断路径：原始响应 > max_response_size 时 Qveris 改放 full_content_file_url，
-    # 需要额外下载一次拿到完整响应（内容结构与正常路径一致）。
-    if raw is None and result.get("full_content_file_url"):
-        raw = client.download_full_content(result["full_content_file_url"])
+    if len(raw_bytes) > MAX_RESPONSE_BYTES:
+        raise RuntimeError(f"deepseekdata 响应超过大小限制：{MAX_RESPONSE_BYTES} 字节")
+    try:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"deepseekdata 返回的不是有效 JSON（位置 {exc.pos}）。") from exc
     if not isinstance(raw, dict):
         raise RuntimeError(
-            f"Qveris 返回结果结构异常：{json.dumps(result, ensure_ascii=False)[:300]}"
+            f"deepseekdata 返回结果结构异常：{json.dumps(raw, ensure_ascii=False)[:300]}"
         )
     if raw.get("code") != 0:
         raise RuntimeError(f"deepseekdata API 错误：{raw.get('msg')}")

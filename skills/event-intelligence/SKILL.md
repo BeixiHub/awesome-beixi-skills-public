@@ -25,7 +25,7 @@ description: 定时获取事件资讯并自动推送到飞书；支持手动获�
 - 面向普通用户说明配置缺失时，不要提及 `openclaw/openclaw.json`、`openclaw.json`、`state/push_config.json`、`OPENCLAW_CONFIG_PATH` 等内部文件或环境变量；除非用户明确要求调试内部配置路径。
 - 飞书接收目标缺失时，使用用户可理解的话术：`请提供飞书接收目标：Webhook URL，或飞书自建应用的 receive_id（群聊或个人）。如果要推送到群聊，请提供群聊 chat_id/receive_id；如果不知道，我可以根据群聊名称或成员协助查找。`
 - 如果已检测到飞书 App ID/App Secret，但缺少 receive_id，不要说“在 openclaw.json 中配置”；应说“还缺少飞书接收目标，请提供群聊的 receive_id/chat_id，或提供 Webhook URL。”
-- 回复中不得展示 Qveris token 明文；设置完成后只确认“已保存/已配置”。
+- 回复中不得展示 deepseekdata API key 明文；设置完成后只确认“已保存/已配置”。
 
 ## 文件结构
 
@@ -33,7 +33,6 @@ description: 定时获取事件资讯并自动推送到飞书；支持手动获�
 event-intelligence/
 ├── SKILL.md              # 本文件，技能说明
 ├── event_query.py                # 事件查询、详情和每日总结函数
-├── qveris_client.py              # Qveris REST 客户端
 ├── push_runtime.py               # 自动推送运行时
 └── state/
     ├── push_config.json  # 推送运行时配置（调度、关键词、上次推送时间等）
@@ -43,8 +42,8 @@ event-intelligence/
 ## 前置条件
 
 - Python 3.10+
-- 网络可达 `https://qveris.ai`与飞书
-- Qveris token 必须提前配置。运行时按内部配置、`state/push_config.json` 中的 `qveris_token`、进程环境变量 `QVERIS_TOKEN` / `QVERIS_API_TOKEN` 的顺序解析；如果用户未提供，必须先提醒用户提供 token，写入配置后才能继续执行事件查询、推送或定时任务。
+- 网络可达 `https://admin.deepseekdata.com` 与飞书
+- deepseekdata API key 必须提前配置。运行时按内部配置、`state/push_config.json` 中的 `event_intel_api_key` / `api_key` / `deepseekdata_api_key`、进程环境变量 `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY` 的顺序解析；如果用户未提供，必须先提醒用户提供 key，写入配置后才能继续执行事件查询、推送或定时任务。
 - 飞书 App Secret 等敏感凭证不写入代码或 `state/push_config.json`；运行时从环境变量或内部配置读取。接收目标 receive_id 和 Webhook 属于部署时状态，只能写入当前安装实例，不得写入通用源码或示例任务。
 - 飞书推送支持两种目标：webhook，或自建应用。自建应用需要 App ID、App Secret 和接收目标 receive_id；运行时会用 App ID/App Secret 调用飞书 `tenant_access_token/internal` 获取 token 后再推送消息。
 
@@ -74,7 +73,7 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
 
 ### 敏感配置读取规则
 
-- Qveris：token 解析优先级为内部配置、`state/push_config.json` 的 `qveris_token`、进程环境变量 `QVERIS_TOKEN` / `QVERIS_API_TOKEN`。缺失时必须明确要求用户提供 token，并通过 stdin 或文件持久化：`printf "%s" "<TOKEN>" | $PY push_runtime.py set-qveris-token --token -`；已有本地密钥文件时优先执行 `$PY push_runtime.py set-qveris-token --token-file "<TOKEN_FILE>"`。不要把 token 明文放进普通 CLI 参数。
+- deepseekdata：API key 解析优先级为内部配置、`state/push_config.json` 的 `event_intel_api_key` / `api_key` / `deepseekdata_api_key`、进程环境变量 `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY`。缺失时必须明确要求用户提供 key，并通过 stdin 或文件持久化：`printf "%s" "<API_KEY>" | $PY push_runtime.py set-api-key --key -`；已有本地密钥文件时优先执行 `$PY push_runtime.py set-api-key --key-file "<KEY_FILE>"`。不要把 key 明文放进普通 CLI 参数。
 - 飞书 webhook：读取 `state/push_config.json` 的 `feishu_webhooks` 以及 `openclaw/openclaw.json` 中飞书/飞书 Lark 上下文里的 webhook 字段。
 - 飞书自建应用：App ID/App Secret 从环境变量或 `openclaw/openclaw.json` 中飞书/飞书 Lark 上下文读取；接收目标 receive_id/receive_id_type 优先读取 `state/push_config.json` 中的部署时配置，其次读取环境变量和 `openclaw/openclaw.json`。拿到 App ID/App Secret 后，运行时调用飞书 `auth/v3/tenant_access_token/internal` 获取 token，再调用 `im/v1/messages` 推送。
 - 如果用户提供飞书群聊 receive_id/chat_id，执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id` 持久化到当前安装实例；如果用户提供 Webhook URL，通过 stdin 或文件持久化：`printf "%s" "<WEBHOOK_URL>" | $PY push_runtime.py set-feishu-webhook --url -`；已有本地文件时优先执行 `$PY push_runtime.py set-feishu-webhook --url-file "<WEBHOOK_FILE>"`。`set-feishu-webhook` 默认替换现有 webhook 列表；明确需要多个 webhook 时追加 `--append`。这些值属于用户部署状态，不得提交到通用源码。
@@ -88,7 +87,7 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
 
 用户说"开始推送"/"启动事件推送"/"开始定时推送"等触发本技能后：
 
-1. **检查密钥和目标**：执行 `$PY push_runtime.py status`，确认 `qveris.has_token=true`；确认 `feishu.webhook_count > 0`，或 `feishu.has_app_id=true`、`feishu.has_app_secret=true`、`feishu.has_receive_id=true`。如果 Qveris token 缺失，先提醒用户提供，并通过 stdin 或 `--token-file` 保存；如果只有飞书 App ID/App Secret 但没有接收目标，提醒用户提供飞书接收目标（Webhook URL，或自建应用的 receive_id/receive_id_type；群聊可提供 chat_id/receive_id）。拿到 receive_id 后执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id`；拿到 Webhook URL 后通过 stdin 或 `--url-file` 保存。
+1. **检查密钥和目标**：执行 `$PY push_runtime.py status`，确认 `event_api.has_key=true`；确认 `feishu.webhook_count > 0`，或 `feishu.has_app_id=true`、`feishu.has_app_secret=true`、`feishu.has_receive_id=true`。如果 deepseekdata API key 缺失，先提醒用户提供，并通过 stdin 或 `--key-file` 保存；如果只有飞书 App ID/App Secret 但没有接收目标，提醒用户提供飞书接收目标（Webhook URL，或自建应用的 receive_id/receive_id_type；群聊可提供 chat_id/receive_id）。拿到 receive_id 后执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id`；拿到 Webhook URL 后通过 stdin 或 `--url-file` 保存。
 2. **读取配置**：读取 `state/push_config.json`，获取当前推送参数。
 3. **确认参数**：向用户确认以下参数（如果配置文件已有值，展示当前值并问是否需要修改）：
    - `schedule`：推送调度档位（默认 `5m`），只能选择 `5m`、`15m`、`60m`、`24h`、`daily-0915`、`daily-1245`、`daily-1445`
@@ -512,7 +511,7 @@ $PY -c "import json; from event_query import get_event_detail; print(json.dumps(
   "feishu_webhooks": [],
   "feishu_receive_id": "",
   "feishu_receive_id_type": "chat_id",
-  "qveris_token": ""
+  "event_intel_api_key": ""
 }
 ```
 
@@ -527,7 +526,7 @@ $PY -c "import json; from event_query import get_event_detail; print(json.dumps(
 | `feishu_webhooks`       | array   | 部署时配置的飞书 Webhook URL 列表；回复和日志中不要展示明文 |
 | `feishu_receive_id`     | string  | 部署时配置的飞书自建应用接收目标；群聊通常为 chat_id/receive_id |
 | `feishu_receive_id_type`| string  | 飞书接收目标类型，默认 `chat_id` |
-| `qveris_token`          | string  | Qveris token fallback；优先使用内部配置，回复和日志中不要展示明文 |
+| `event_intel_api_key`   | string  | deepseekdata API key fallback；优先使用内部配置，回复和日志中不要展示明文 |
 
 ---
 
@@ -563,7 +562,7 @@ $PY -c "import json; from event_query import get_event_detail; print(json.dumps(
 ### 用户说“开始推送 / 开启事件监控”
 
 1. 若配置不存在，先执行 `$PY push_runtime.py init-config`。
-2. 执行 `$PY push_runtime.py status` 检查密钥状态。若 `qveris.has_token=false`，请用户提供 Qveris token，并通过 stdin 或 `--token-file` 保存；若飞书没有 webhook 且自建应用缺少 App ID/App Secret/receive_id 任一项，请用户提供缺失的飞书凭据或接收目标（Webhook URL，或自建应用 App ID/App Secret/receive_id），但对外不要提及内部配置文件名。拿到 receive_id 后执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id`；拿到 Webhook URL 后通过 stdin 或 `--url-file` 保存。
+2. 执行 `$PY push_runtime.py status` 检查密钥状态。若 `event_api.has_key=false`，请用户提供 deepseekdata API key，并通过 stdin 或 `--key-file` 保存；若飞书没有 webhook 且自建应用缺少 App ID/App Secret/receive_id 任一项，请用户提供缺失的飞书凭据或接收目标（Webhook URL，或自建应用 App ID/App Secret/receive_id），但对外不要提及内部配置文件名。拿到 receive_id 后执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id`；拿到 Webhook URL 后通过 stdin 或 `--url-file` 保存。
 3. 确认运行时已解析到飞书发送目标；执行 `$PY push_runtime.py configure --active --keywords "<KEYWORD1>,<KEYWORD2>" --schedule <SCHEDULE> --page-size <PAGE_SIZE>` 写入关键词、调度档位、条数，并设置 `active=true`。单关键词也使用 `--keywords "<KEYWORD>"`。多关键词最多 3 个，超过 3 个直接回复不支持，不要调用命令。每日统计与事件推送一起启动。
 4. 执行 `$PY push_runtime.py run-once --quiet`（立即验证一次推送链路，但不把事件 JSON 放入当前上下文）。
 5. 执行 `$PY push_runtime.py install-schedule`。
