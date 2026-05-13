@@ -27,7 +27,8 @@ description: Client skill for OpenClaw/ArkClaw-compatible agents to use the Beix
 
 - `PAPER_TRADING_API_BASE_URL`: 转接服务地址，当前环境使用 `http://42.193.103.122:10288/admin-api`
 - `PAPER_TRADING_TENANT_ID`: 平台租户 ID，当前环境使用 `1`
-- `PAPER_TRADING_API_TOKEN`: 可选；当前转接服务不需要 bearer token
+- `DEEPSEEK_DATA_API_KEY`: 必填；转接服务要求通过 `X-API-Key` 请求头提交。客户端会优先读取本目录 `.env`，也会自动查找父目录里的 `router_env`
+- `PAPER_TRADING_API_TOKEN`: 兼容旧环境的可选 bearer token；当前转接服务不靠它鉴权
 - `PAPER_TRADING_USER_ID`: 当前智能体用户 ID，默认 `local-user`；上架平台应覆盖为真实业务用户 ID
 
 ## 常用命令

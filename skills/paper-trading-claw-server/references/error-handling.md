@@ -25,7 +25,8 @@
 
 常见错误：
 
-- `UNAUTHORIZED`: 后端启用了 `PAPER_TRADING_API_TOKEN`，但客户端没有带 token。
+- `PLATFORM_1010000010` / `API Key 不存在`: 没有配置 `DEEPSEEK_DATA_API_KEY`，或请求没有带 `X-API-Key`。
+- `UNAUTHORIZED`: 兼容旧 bearer-token 后端时可能出现；当前转接服务主要使用 `DEEPSEEK_DATA_API_KEY`。
 - `INVALID_PHONE`: 手机号格式不正确。
 - `SMS_VERIFY_FAILED`: 火山短信验证码校验失败。
 - `SMS_NOT_VERIFIED`: 还没完成短信验证，不能注册。

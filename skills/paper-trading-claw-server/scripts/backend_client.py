@@ -65,12 +65,15 @@ class BackendClient:
         self.timeout = int(os.getenv("PAPER_TRADING_API_TIMEOUT_SECONDS", "30"))
         self.user_id = user_id or os.getenv("PAPER_TRADING_USER_ID", "local-user")
         self.token = os.getenv("PAPER_TRADING_API_TOKEN", "").strip()
+        self.api_key = os.getenv("DEEPSEEK_DATA_API_KEY", "").strip()
         self.tenant_id = os.getenv("PAPER_TRADING_TENANT_ID", "1").strip()
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json", "X-User-Id": self.user_id}
         if self.tenant_id:
             headers["tenant-id"] = self.tenant_id
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
@@ -127,7 +130,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         "apiBaseUrl": base,
         "tenantId": backend.tenant_id,
         "userId": backend.user_id,
-        "hasApiToken": bool(os.getenv("PAPER_TRADING_API_TOKEN", "").strip()),
+        "hasDeepseekDataApiKey": bool(backend.api_key),
+        "hasLegacyApiToken": bool(os.getenv("PAPER_TRADING_API_TOKEN", "").strip()),
     }
     try:
         health = backend.request("GET", TRANSFER_API_PREFIX + "/health")

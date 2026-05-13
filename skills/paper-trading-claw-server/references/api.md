@@ -10,7 +10,10 @@
 
 ```http
 tenant-id: 1
+X-API-Key: <DEEPSEEK_DATA_API_KEY>
 ```
+
+客户端会从本目录 `.env` 或父目录 `router_env` 读取 `DEEPSEEK_DATA_API_KEY`，并自动写入 `X-API-Key` 请求头。`Authorization: Bearer ...` 不能替代该字段。
 
 转接服务返回平台统一包装：
 
