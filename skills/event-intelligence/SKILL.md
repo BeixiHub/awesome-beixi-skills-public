@@ -589,4 +589,8 @@ $PY -c "import json; from event_query import get_event_detail; print(json.dumps(
 
 ### 用户说“看某条详情”
 
-走第二段逻辑，实时查询并生成详细报告。
+1. 先执行 `$PY push_runtime.py detail-from-ref --query "<用户原话>"`。这个命令会解析“第X条详细看看”“详细看看第X个”“我要看第X个的深度报告”“XX那条”等问法，并优先从 `state/push_history.json` 的最新批次 `batches[0]` 匹配事件；“上一轮/上一次”类说法会匹配 `batches[1]`。
+2. 如果命令返回 `status=ok`，必须使用返回的 `detail` 字段生成“结构化事件分析报告”，并明确数据来源为 `deepseekdata API`。不要改用网页搜索或公开新闻摘要。
+3. 如果命令返回 `status=ambiguous`，列出 `candidates` 的序号和标题，请用户补充选择，不要自行猜测。
+4. 如果命令返回 `status=not_found`，先明确说明“该事件不在最近推送事件范围内，无法使用 deepseekdata 推送事件详情接口命中；以下报告将改用其他数据源生成”，然后再使用其他可用数据源生成报告。
+5. 如果命令返回 API key 或网络错误，直接告知“事件数据获取失败”及错误原因，不编造 deepseekdata 详情。
