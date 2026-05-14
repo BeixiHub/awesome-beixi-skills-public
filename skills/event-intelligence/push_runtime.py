@@ -630,28 +630,44 @@ def build_daily_summary_text(keyword_label: str, result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_feishu_post_content(text: str) -> dict[str, Any]:
-    """把推送纯文本转换为飞书 post 富文本内容。
+def build_feishu_interactive_card(text: str) -> dict[str, Any]:
+    """把推送纯文本转换为飞书 interactive 卡片内容。
 
     原版直接发送 msg_type=text，飞书群聊会按普通文本渲染，长摘要的层次感较弱。
-    这里保留 build_push_text 生成的详细内容，把每一行拆成一个富文本段落，
-    让 Webhook 和自建应用推送都尽量呈现 12:54 手动推送那种可阅读格式。
+    曾尝试改成 msg_type=post，但自建应用 API 对 post 的 content 嵌套更敏感，
+    容易返回 230001 参数无效。这里统一使用 interactive 卡片：Webhook 发送
+    {"msg_type": "interactive", "card": ...}，自建应用发送 msg_type=interactive
+    且 content 为卡片 JSON 字符串，兼容性更稳定，也更接近 12:54 的详细阅读格式。
     """
     lines = text.splitlines()
     title = lines[0].strip() if lines and lines[0].strip() else "事件推送"
     content_lines = lines[1:] if lines else []
-    content = [
-        [{"tag": "text", "text": line if line else " "}]
-        for line in content_lines
-    ]
-    return {"zh_cn": {"title": title, "content": content}}
+    elements: list[dict[str, Any]] = []
+    for line in content_lines:
+        if line == "━━━━━━━━━━━━━━━━━━━━━━━━":
+            elements.append({"tag": "hr"})
+            continue
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": line if line else " "},
+            }
+        )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": elements,
+    }
 
 
 def post_to_feishu(webhook: str, text: str) -> dict[str, Any]:
     # 原版使用 msg_type=text：payload = {"msg_type": "text", "content": {"text": text}}
-    # 修改为 msg_type=post，是为了让飞书 Webhook 按富文本段落渲染详细事件摘要，
-    # 在群聊里更接近 12:54 手动推送时看到的标题、分隔线和摘要层次。
-    payload = {"msg_type": "post", "content": {"post": build_feishu_post_content(text)}}
+    # 修改为 msg_type=interactive，是为了让飞书 Webhook 按卡片段落渲染详细事件摘要，
+    # 避开 post 在自建应用 API 下容易出现的参数嵌套兼容问题。
+    payload = {"msg_type": "interactive", "card": build_feishu_interactive_card(text)}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = Request(
         webhook,
@@ -969,13 +985,13 @@ def post_to_feishu_app(target: dict[str, str], text: str) -> dict[str, Any]:
         )
     token = fetch_feishu_tenant_access_token(target["app_id"], target["app_secret"])
     # 原版自建应用也发送 msg_type=text，content 是 {"text": text}。
-    # 这里同步改为 post 富文本，避免 Webhook 和自建应用两条推送路径格式不一致。
-    content = json.dumps(build_feishu_post_content(text), ensure_ascii=False)
+    # post 富文本在自建应用 API 下可能触发 230001 参数无效；改用更稳定的卡片消息。
+    content = json.dumps(build_feishu_interactive_card(text), ensure_ascii=False)
     parsed = post_json_request(
         f"{feishu_api_base()}/im/v1/messages?receive_id_type={receive_id_type}",
         {
             "receive_id": target["receive_id"],
-            "msg_type": "post",
+            "msg_type": "interactive",
             "content": content,
         },
         {
