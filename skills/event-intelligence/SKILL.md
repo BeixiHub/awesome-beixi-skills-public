@@ -43,7 +43,7 @@ event-intelligence/
 
 - Python 3.10+
 - 网络可达 `https://admin.deepseekdata.com` 与飞书
-- deepseekdata API key 必须提前配置。运行时按内部配置、`state/push_config.json` 中的 `event_intel_api_key` / `api_key` / `deepseekdata_api_key`、进程环境变量 `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY` 的顺序解析；如果用户未提供，必须先提醒用户提供 key，写入配置后才能继续执行事件查询、推送或定时任务。
+- deepseekdata API key 必须提前配置。运行时按 `state/push_config.json` 中的 `event_intel_api_key` / `api_key` / `deepseekdata_api_key`、进程环境变量 `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY`、内部配置中的明确 deepseekdata 字段的顺序解析；如果用户未提供，必须先提醒用户提供 key，写入配置后才能继续执行事件查询、推送或定时任务。
 - 飞书 App Secret 等敏感凭证不写入代码或 `state/push_config.json`；运行时从环境变量或内部配置读取。接收目标 receive_id 和 Webhook 属于部署时状态，只能写入当前安装实例，不得写入通用源码或示例任务。
 - 飞书推送支持两种目标：webhook，或自建应用。自建应用需要 App ID、App Secret 和接收目标 receive_id；运行时会用 App ID/App Secret 调用飞书 `tenant_access_token/internal` 获取 token 后再推送消息。
 
@@ -73,7 +73,7 @@ if [ -z "$PY" ]; then echo "错误：未找到 python3 或 python，请先安装
 
 ### 敏感配置读取规则
 
-- deepseekdata：API key 解析优先级为内部配置、`state/push_config.json` 的 `event_intel_api_key` / `api_key` / `deepseekdata_api_key`、进程环境变量 `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY`。缺失时必须明确要求用户提供 key，并通过 stdin 或文件持久化：`printf "%s" "<API_KEY>" | $PY push_runtime.py set-api-key --key -`；已有本地密钥文件时优先执行 `$PY push_runtime.py set-api-key --key-file "<KEY_FILE>"`。不要把 key 明文放进普通 CLI 参数。
+- deepseekdata：API key 解析优先级为 `state/push_config.json` 的 `event_intel_api_key` / `api_key` / `deepseekdata_api_key`、进程环境变量 `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY`、内部配置中的 `event_intel_api_key` / `deepseekdata_api_key` / `EVENT_INTEL_API_KEY` / `DEEPSEEKDATA_API_KEY`。内部配置里的 LLM provider `apiKey` / `api_key` 不得当作 deepseekdata 凭据。缺失时必须明确要求用户提供 key，并通过 stdin 或文件持久化：`printf "%s" "<API_KEY>" | $PY push_runtime.py set-api-key --key -`；已有本地密钥文件时优先执行 `$PY push_runtime.py set-api-key --key-file "<KEY_FILE>"`。不要把 key 明文放进普通 CLI 参数；如果用户提供 key 后仍报 API key 错误，不要绕过 `push_runtime.py` 或手工伪造推送结果，应重新保存 key 后再执行 `manual-push` / `run-once`。
 - 飞书 webhook：读取 `state/push_config.json` 的 `feishu_webhooks` 以及 `openclaw/openclaw.json` 中飞书/飞书 Lark 上下文里的 webhook 字段。
 - 飞书自建应用：App ID/App Secret 从环境变量或 `openclaw/openclaw.json` 中飞书/飞书 Lark 上下文读取；接收目标 receive_id/receive_id_type 优先读取 `state/push_config.json` 中的部署时配置，其次读取环境变量和 `openclaw/openclaw.json`。拿到 App ID/App Secret 后，运行时调用飞书 `auth/v3/tenant_access_token/internal` 获取 token，再调用 `im/v1/messages` 推送。
 - 如果用户提供飞书群聊 receive_id/chat_id，执行 `$PY push_runtime.py set-feishu-target --receive-id "<RECEIVE_ID>" --receive-id-type chat_id` 持久化到当前安装实例；如果用户提供 Webhook URL，通过 stdin 或文件持久化：`printf "%s" "<WEBHOOK_URL>" | $PY push_runtime.py set-feishu-webhook --url -`；已有本地文件时优先执行 `$PY push_runtime.py set-feishu-webhook --url-file "<WEBHOOK_FILE>"`。`set-feishu-webhook` 默认替换现有 webhook 列表；明确需要多个 webhook 时追加 `--append`。这些值属于用户部署状态，不得提交到通用源码。
@@ -526,7 +526,7 @@ $PY -c "import json; from event_query import get_event_detail; print(json.dumps(
 | `feishu_webhooks`       | array   | 部署时配置的飞书 Webhook URL 列表；回复和日志中不要展示明文 |
 | `feishu_receive_id`     | string  | 部署时配置的飞书自建应用接收目标；群聊通常为 chat_id/receive_id |
 | `feishu_receive_id_type`| string  | 飞书接收目标类型，默认 `chat_id` |
-| `event_intel_api_key`   | string  | deepseekdata API key fallback；优先使用内部配置，回复和日志中不要展示明文 |
+| `event_intel_api_key`   | string  | deepseekdata API key fallback；优先于内部配置，回复和日志中不要展示明文 |
 
 ---
 
@@ -589,4 +589,8 @@ $PY -c "import json; from event_query import get_event_detail; print(json.dumps(
 
 ### 用户说“看某条详情”
 
-走第二段逻辑，实时查询并生成详细报告。
+1. 先执行 `$PY push_runtime.py detail-from-ref --query "<用户原话>"`。这个命令会解析“第X条详细看看”“详细看看第X个”“我要看第X个的深度报告”“XX那条”等问法，并优先从 `state/push_history.json` 的最新批次 `batches[0]` 匹配事件；“上一轮/上一次”类说法会匹配 `batches[1]`。
+2. 如果命令返回 `status=ok`，必须使用返回的 `detail` 字段生成“结构化事件分析报告”，并明确数据来源为 `deepseekdata API`。不要改用网页搜索或公开新闻摘要。
+3. 如果命令返回 `status=ambiguous`，列出 `candidates` 的序号和标题，请用户补充选择，不要自行猜测。
+4. 如果命令返回 `status=not_found`，先明确说明“该事件不在最近推送事件范围内，无法使用 deepseekdata 推送事件详情接口命中；以下报告将改用其他数据源生成”，然后再使用其他可用数据源生成报告。
+5. 如果命令返回 API key 或网络错误，直接告知“事件数据获取失败”及错误原因，不编造 deepseekdata 详情。

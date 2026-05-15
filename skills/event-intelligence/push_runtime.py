@@ -119,6 +119,78 @@ def keywords_label(keywords: list[str]) -> str:
     return " / ".join(keywords)
 
 
+CHINESE_NUMERAL_MAP = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+def chinese_numeral_to_int(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text in CHINESE_NUMERAL_MAP:
+        return CHINESE_NUMERAL_MAP[text]
+    if "十" not in text:
+        return None
+    left, _, right = text.partition("十")
+    tens = CHINESE_NUMERAL_MAP.get(left, 1) if left else 1
+    ones = CHINESE_NUMERAL_MAP.get(right, 0) if right else 0
+    result = tens * 10 + ones
+    return result if result > 0 else None
+
+
+def parse_event_ref(query: str) -> dict[str, Any]:
+    """Parse user phrases such as "第3条详细看看" or "我要看第三个深度报告"."""
+    text = str(query or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    batch_offset = 1 if re.search(r"上一轮|上一次|上轮|前一轮", compact) else 0
+
+    index: int | None = None
+    index_patterns = (
+        r"第(?P<num>\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)?",
+        r"(?P<num>\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)(?:.*?)(?:详细|详情|深度|看看|看一下)",
+    )
+    for pattern in index_patterns:
+        match = re.search(pattern, compact)
+        if not match:
+            continue
+        index = chinese_numeral_to_int(match.group("num"))
+        if index is not None:
+            break
+
+    title_keyword = compact
+    title_keyword = re.sub(r"上一轮|上一次|上轮|前一轮|刚才|刚刚|本轮|这轮|推送|事件", "", title_keyword)
+    title_keyword = re.sub(r"第(?:\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)?", "", title_keyword)
+    title_keyword = re.sub(r"\d+(?:条|个|则|篇)", "", title_keyword)
+    title_keyword = re.sub(
+        r"详细看看|详细看一下|详细|详情|深度报告|深度分析|报告|看看|看一下|我要看|我想看|关于|那条|那个|这个",
+        "",
+        title_keyword,
+    ).strip(" ，,。.!！?？：:；;、")
+    if len(title_keyword) < 2:
+        title_keyword = ""
+
+    return {
+        "raw": text,
+        "batch_offset": batch_offset,
+        "index": index,
+        "title_keyword": title_keyword,
+    }
+
+
 def now_bjt() -> datetime:
     return datetime.now(tz=BJT)
 
@@ -630,8 +702,44 @@ def build_daily_summary_text(keyword_label: str, result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_feishu_interactive_card(text: str) -> dict[str, Any]:
+    """把推送纯文本转换为飞书 interactive 卡片内容。
+
+    原版直接发送 msg_type=text，飞书群聊会按普通文本渲染，长摘要的层次感较弱。
+    曾尝试改成 msg_type=post，但自建应用 API 对 post 的 content 嵌套更敏感，
+    容易返回 230001 参数无效。这里统一使用 interactive 卡片：Webhook 发送
+    {"msg_type": "interactive", "card": ...}，自建应用发送 msg_type=interactive
+    且 content 为卡片 JSON 字符串，兼容性更稳定，也更接近 12:54 的详细阅读格式。
+    """
+    lines = text.splitlines()
+    title = lines[0].strip() if lines and lines[0].strip() else "事件推送"
+    content_lines = lines[1:] if lines else []
+    elements: list[dict[str, Any]] = []
+    for line in content_lines:
+        if line == "━━━━━━━━━━━━━━━━━━━━━━━━":
+            elements.append({"tag": "hr"})
+            continue
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": line if line else " "},
+            }
+        )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": elements,
+    }
+
+
 def post_to_feishu(webhook: str, text: str) -> dict[str, Any]:
-    payload = {"msg_type": "text", "content": {"text": text}}
+    # 原版使用 msg_type=text：payload = {"msg_type": "text", "content": {"text": text}}
+    # 修改为 msg_type=interactive，是为了让飞书 Webhook 按卡片段落渲染详细事件摘要，
+    # 避开 post 在自建应用 API 下容易出现的参数嵌套兼容问题。
+    payload = {"msg_type": "interactive", "card": build_feishu_interactive_card(text)}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = Request(
         webhook,
@@ -948,12 +1056,14 @@ def post_to_feishu_app(target: dict[str, str], text: str) -> dict[str, Any]:
             f"可选值：{feishu_receive_id_type_options_text()}。"
         )
     token = fetch_feishu_tenant_access_token(target["app_id"], target["app_secret"])
-    content = json.dumps({"text": text}, ensure_ascii=False)
+    # 原版自建应用也发送 msg_type=text，content 是 {"text": text}。
+    # post 富文本在自建应用 API 下可能触发 230001 参数无效；改用更稳定的卡片消息。
+    content = json.dumps(build_feishu_interactive_card(text), ensure_ascii=False)
     parsed = post_json_request(
         f"{feishu_api_base()}/im/v1/messages?receive_id_type={receive_id_type}",
         {
             "receive_id": target["receive_id"],
-            "msg_type": "text",
+            "msg_type": "interactive",
             "content": content,
         },
         {
@@ -1053,6 +1163,188 @@ def record_history_batch(
     history["last_error"] = ""
     prune_history(history, retention_days=retention_days)
     return indexed_events, batch_time
+
+
+def compact_batch_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "index": event.get("index"),
+        "eventId": str(event.get("eventId", "") or ""),
+        "compliantTitle": event.get("compliantTitle", ""),
+        "eventPublishDate": event.get("eventPublishDate", ""),
+        "signalLevel": event.get("signalLevel", ""),
+        "matched_keywords": event.get("matched_keywords", []),
+    }
+
+
+def event_ref_keyword(batch: dict[str, Any], event: dict[str, Any]) -> str:
+    matched = event.get("matched_keywords")
+    if isinstance(matched, list):
+        for item in matched:
+            keyword = str(item or "").strip()
+            if keyword:
+                return keyword
+    keywords = batch.get("keywords")
+    if isinstance(keywords, list):
+        for item in keywords:
+            keyword = str(item or "").strip()
+            if keyword:
+                return keyword
+    keyword_label = str(batch.get("keyword_label", "") or "").strip()
+    return split_keywords(keyword_label)[0] if split_keywords(keyword_label) else "AI"
+
+
+def resolve_event_ref_from_history(query: str, history: dict[str, Any]) -> dict[str, Any]:
+    ref = parse_event_ref(query)
+    batches = history.get("batches", [])
+    if not isinstance(batches, list) or not batches:
+        return {
+            "status": "not_found",
+            "reason": "no_push_history",
+            "message": "未在最近的推送记录中找到该事件；当前没有可用推送批次。",
+            "ref": ref,
+            "latest_events": [],
+        }
+
+    batch_offset = int(ref.get("batch_offset", 0) or 0)
+    if batch_offset >= len(batches):
+        return {
+            "status": "not_found",
+            "reason": "batch_not_found",
+            "message": "未在最近的推送记录中找到该事件；指定的历史批次不存在。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in batches[0].get("events", [])],
+        }
+
+    batch = batches[batch_offset]
+    events = batch.get("events", [])
+    if not isinstance(events, list) or not events:
+        return {
+            "status": "not_found",
+            "reason": "empty_batch",
+            "message": "未在最近的推送记录中找到该事件；该批次没有事件。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in batches[0].get("events", [])],
+        }
+
+    index = ref.get("index")
+    if isinstance(index, int) and index > 0:
+        for pos, event in enumerate(events, start=1):
+            event_index = event.get("index", pos)
+            try:
+                event_index_int = int(event_index)
+            except (TypeError, ValueError):
+                event_index_int = pos
+            if event_index_int == index:
+                return {
+                    "status": "matched",
+                    "match_type": "index",
+                    "ref": ref,
+                    "batch": {
+                        "push_time": batch.get("push_time", ""),
+                        "keyword_label": batch.get("keyword_label", ""),
+                        "source": batch.get("source", ""),
+                        "batch_offset": batch_offset,
+                    },
+                    "keyword": event_ref_keyword(batch, event),
+                    "event": event,
+                }
+        return {
+            "status": "not_found",
+            "reason": "index_not_found",
+            "message": f"未在最近的推送记录中找到第 {index} 条事件。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in events],
+        }
+
+    title_keyword = str(ref.get("title_keyword", "") or "").casefold()
+    if title_keyword:
+        candidates: list[dict[str, Any]] = []
+        for event in events:
+            haystack = "\n".join(
+                str(event.get(key, "") or "")
+                for key in ("compliantTitle", "summary", "original_summary")
+            ).casefold()
+            if title_keyword in haystack:
+                candidates.append(event)
+        if len(candidates) == 1:
+            event = candidates[0]
+            return {
+                "status": "matched",
+                "match_type": "title_keyword",
+                "ref": ref,
+                "batch": {
+                    "push_time": batch.get("push_time", ""),
+                    "keyword_label": batch.get("keyword_label", ""),
+                    "source": batch.get("source", ""),
+                    "batch_offset": batch_offset,
+                },
+                "keyword": event_ref_keyword(batch, event),
+                "event": event,
+            }
+        if len(candidates) > 1:
+            return {
+                "status": "ambiguous",
+                "reason": "multiple_title_matches",
+                "message": "在最近推送中匹配到多条事件，请指定序号。",
+                "ref": ref,
+                "candidates": [compact_batch_event(item) for item in candidates],
+            }
+
+    return {
+        "status": "not_found",
+        "reason": "no_match",
+        "message": "该问题不在最近推送事件范围内；如需继续，我会显式说明并改用其他数据源生成报告。",
+        "ref": ref,
+        "latest_events": [compact_batch_event(item) for item in events],
+    }
+
+
+def detail_from_history_ref(query: str) -> dict[str, Any]:
+    cfg = load_runtime_config()
+    history = load_history(retention_days=cfg["retention_days"])
+    prune_history(history, retention_days=cfg["retention_days"])
+    resolved = resolve_event_ref_from_history(query, history)
+    if resolved.get("status") != "matched":
+        return resolved
+
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
+    apply_runtime_event_api_key(cfg, reset_client=True)
+
+    event = resolved.get("event", {})
+    event_id = str(event.get("eventId", "") or "")
+    if not event_id:
+        return {
+            "status": "not_found",
+            "reason": "missing_event_id",
+            "message": "最近推送记录中找到了该事件，但缺少 eventId，无法调用 deepseekdata 详情接口。",
+            "resolved": resolved,
+        }
+    keyword = str(resolved.get("keyword", "") or "AI")
+    detail_func = getattr(_event_query, "get_event_detail")
+    detail = detail_func(keyword=keyword, event_id=event_id)
+    if not detail:
+        return {
+            "status": "not_found",
+            "reason": "detail_not_found",
+            "message": "已在最近推送中找到该事件，但 deepseekdata 详情接口未返回详情。",
+            "resolved": {
+                **resolved,
+                "event": compact_batch_event(event),
+            },
+        }
+    return {
+        "status": "ok",
+        "source": "deepseekdata_api",
+        "message": "已从最近推送事件中匹配，并通过 deepseekdata API 获取详情。",
+        "keyword": keyword,
+        "eventId": event_id,
+        "resolved": {
+            **resolved,
+            "event": compact_batch_event(event),
+        },
+        "detail": detail,
+    }
 
 
 def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
@@ -1647,6 +1939,12 @@ def cmd_status(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_detail_from_ref(args: argparse.Namespace) -> int:
+    result = detail_from_history_ref(args.query)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_run_loop(args: argparse.Namespace) -> int:
     return run_loop(
         force=args.force,
@@ -1786,6 +2084,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = sub.add_parser("status", help="查看运行时状态")
     status_parser.set_defaults(func=cmd_status)
+
+    detail_parser = sub.add_parser(
+        "detail-from-ref",
+        help="从最近推送历史中解析用户问法，并调用 deepseekdata 获取事件详情",
+    )
+    detail_parser.add_argument("--query", required=True, help="用户原始问句，例如：第3条详细看看")
+    detail_parser.set_defaults(func=cmd_detail_from_ref)
 
     run_loop_parser = sub.add_parser("run-loop", help="在当前进程中循环运行")
     run_loop_parser.add_argument("--force", action="store_true")
