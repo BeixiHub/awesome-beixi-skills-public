@@ -11,6 +11,10 @@ EVENT_API_CONFIG_KEYS = (
     "api_key",
     "deepseekdata_api_key",
 )
+OPENCLAW_EVENT_API_CONFIG_KEYS = (
+    "event_intel_api_key",
+    "deepseekdata_api_key",
+)
 
 
 def skill_dir() -> Path:
@@ -258,9 +262,13 @@ def find_openclaw_event_api_key(value: Any) -> str:
         env_token = _token_from_env_value(value.get("env"))
         if env_token:
             return env_token
+        exact_key_names = {
+            normalize_key(item)
+            for item in (*EVENT_API_ENV_KEYS, *OPENCLAW_EVENT_API_CONFIG_KEYS)
+        }
         for key, raw_value in value.items():
             key_norm = normalize_key(key)
-            if key_norm in {normalize_key(item) for item in (*EVENT_API_ENV_KEYS, *EVENT_API_CONFIG_KEYS)}:
+            if key_norm in exact_key_names:
                 token = as_nonempty_str(raw_value)
                 if token:
                     return token
@@ -289,13 +297,13 @@ def event_api_key_from_openclaw_config() -> str:
 def resolve_event_api_key(runtime_config: dict[str, Any] | None = None) -> str:
     """Resolve deepseekdata event API key in the documented order.
 
-    Priority: OpenClaw config, runtime push_config, then process environment.
+    Priority: runtime push_config, process environment, then OpenClaw config.
     """
     for token in (
-        event_api_key_from_openclaw_config(),
         event_api_key_from_config(runtime_config),
         os.getenv("EVENT_INTEL_API_KEY", "").strip(),
         os.getenv("DEEPSEEKDATA_API_KEY", "").strip(),
+        event_api_key_from_openclaw_config(),
     ):
         if token:
             return token

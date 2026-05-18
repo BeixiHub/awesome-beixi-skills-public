@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import shlex
 import subprocess
 import sys
@@ -13,15 +14,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import event_query as _event_query
+import channels
+from channels import feishu as feishu_channel
+from channels import openclaw_weixin
 from event_query import daily_event_summary_many, search_events
 from runtime_config import (
-    load_openclaw_feishu_config,
     resolve_event_api_key,
-    split_env_values,
 )
 
 BJT = timezone(timedelta(hours=8))
@@ -31,7 +31,7 @@ STATE_DIR = SCRIPT_DIR / "state"
 PUSH_CONFIG_PATH = STATE_DIR / "push_config.json"
 HISTORY_PATH = STATE_DIR / "push_history.json"
 DEFAULT_TASK_NAME = "OpenClaw-Event-Intelligence-Push"
-VALID_FEISHU_RECEIVE_ID_TYPES = {"chat_id", "open_id", "user_id", "union_id", "email"}
+OPENCLAW_NO_REPLY = openclaw_weixin.NO_REPLY
 MAX_KEYWORDS = 3
 SIGNAL_LEVEL_PRIORITY = {"S级": 0, "A级": 1, "B级": 2, "C级": 3}
 DEFAULT_SCHEDULE = "5m"
@@ -67,10 +67,6 @@ def schedule_label(schedule: str) -> str:
 
 def schedule_hint_message(prefix: str, schedule: str) -> str:
     return f"{prefix}当前定时推送时间：{schedule_label(schedule)}。如需调整，可选：{schedule_options_text()}。"
-
-
-def feishu_receive_id_type_options_text() -> str:
-    return "、".join(sorted(VALID_FEISHU_RECEIVE_ID_TYPES))
 
 
 def keyword_limit_message(count: int | None = None) -> str:
@@ -117,6 +113,78 @@ def validate_keywords(value: Any) -> list[str]:
 
 def keywords_label(keywords: list[str]) -> str:
     return " / ".join(keywords)
+
+
+CHINESE_NUMERAL_MAP = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+def chinese_numeral_to_int(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text in CHINESE_NUMERAL_MAP:
+        return CHINESE_NUMERAL_MAP[text]
+    if "十" not in text:
+        return None
+    left, _, right = text.partition("十")
+    tens = CHINESE_NUMERAL_MAP.get(left, 1) if left else 1
+    ones = CHINESE_NUMERAL_MAP.get(right, 0) if right else 0
+    result = tens * 10 + ones
+    return result if result > 0 else None
+
+
+def parse_event_ref(query: str) -> dict[str, Any]:
+    """Parse user phrases such as "第3条详细看看" or "我要看第三个深度报告"."""
+    text = str(query or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    batch_offset = 1 if re.search(r"上一轮|上一次|上轮|前一轮", compact) else 0
+
+    index: int | None = None
+    index_patterns = (
+        r"第(?P<num>\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)?",
+        r"(?P<num>\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)(?:.*?)(?:详细|详情|深度|看看|看一下)",
+    )
+    for pattern in index_patterns:
+        match = re.search(pattern, compact)
+        if not match:
+            continue
+        index = chinese_numeral_to_int(match.group("num"))
+        if index is not None:
+            break
+
+    title_keyword = compact
+    title_keyword = re.sub(r"上一轮|上一次|上轮|前一轮|刚才|刚刚|本轮|这轮|推送|事件", "", title_keyword)
+    title_keyword = re.sub(r"第(?:\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)?", "", title_keyword)
+    title_keyword = re.sub(r"\d+(?:条|个|则|篇)", "", title_keyword)
+    title_keyword = re.sub(
+        r"详细看看|详细看一下|详细|详情|深度报告|深度分析|报告|看看|看一下|我要看|我想看|关于|那条|那个|这个",
+        "",
+        title_keyword,
+    ).strip(" ，,。.!！?？：:；;、")
+    if len(title_keyword) < 2:
+        title_keyword = ""
+
+    return {
+        "raw": text,
+        "batch_offset": batch_offset,
+        "index": index,
+        "title_keyword": title_keyword,
+    }
 
 
 def now_bjt() -> datetime:
@@ -257,6 +325,11 @@ def default_runtime_config() -> dict[str, Any]:
         "retention_days": 5,
         "daily_summary_time": "09:00",
         "task_name": DEFAULT_TASK_NAME,
+        "delivery": {
+            "channel": channels.DEFAULT_CHANNEL,
+            "to": "",
+            "accountId": "",
+        },
         "feishu_webhooks": [],
         "feishu_receive_id": "",
         "feishu_receive_id_type": "chat_id",
@@ -314,6 +387,22 @@ def normalize_runtime_config(raw: Any) -> dict[str, Any]:
         daily_time = "09:00"
     cfg["daily_summary_time"] = daily_time
 
+    delivery = cfg.get("delivery", {})
+    if not isinstance(delivery, dict):
+        delivery = {}
+    delivery_channel = delivery.get("channel") or cfg.get("delivery_channel") or cfg.get("channel")
+    delivery["channel"] = channels.normalize_channel(delivery_channel)
+    delivery["to"] = str(delivery.get("to", "") or cfg.get("openclaw_weixin_to", "") or cfg.get("weixin_to", "") or "").strip()
+    delivery["accountId"] = str(
+        delivery.get("accountId", "")
+        or delivery.get("account_id", "")
+        or cfg.get("openclaw_weixin_account_id", "")
+        or cfg.get("weixin_account_id", "")
+        or ""
+    ).strip()
+    delivery.pop("account_id", None)
+    cfg["delivery"] = delivery
+
     webhooks = cfg.get("feishu_webhooks", [])
     if isinstance(webhooks, str):
         webhooks = [webhooks]
@@ -329,7 +418,7 @@ def normalize_runtime_config(raw: Any) -> dict[str, Any]:
     cfg["feishu_receive_id"] = receive_id
 
     receive_id_type = str(cfg.get("feishu_receive_id_type", "chat_id") or "chat_id").strip()
-    if receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
+    if receive_id_type not in feishu_channel.VALID_RECEIVE_ID_TYPES:
         receive_id_type = ""
     if not receive_id and not receive_id_type:
         receive_id_type = "chat_id"
@@ -630,121 +719,6 @@ def build_daily_summary_text(keyword_label: str, result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def post_to_feishu(webhook: str, text: str) -> dict[str, Any]:
-    payload = {"msg_type": "text", "content": {"text": text}}
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = Request(
-        webhook,
-        data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
-    try:
-        with urlopen(req, timeout=30) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        detail = exc.read(2048).decode("utf-8", errors="replace") if exc.fp else ""
-        raise RuntimeError(f"飞书 Webhook HTTP 错误 {exc.code}：{detail or exc.reason}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"飞书 Webhook 请求失败：{exc.reason}") from exc
-
-    try:
-        parsed = json.loads(data)
-    except json.JSONDecodeError:
-        parsed = {"raw": data}
-
-    status_code = parsed.get("StatusCode")
-    code = parsed.get("code")
-    if status_code not in (None, 0) or code not in (None, 0):
-        raise RuntimeError(f"飞书 Webhook 拒绝了本次消息：{parsed}")
-    return parsed
-
-
-def resolve_webhooks(cfg: dict[str, Any]) -> list[str]:
-    webhooks = cfg.get("feishu_webhooks", [])
-    if not isinstance(webhooks, list):
-        webhooks = []
-    env_webhooks = (
-        split_env_values(os.getenv("FEISHU_WEBHOOKS"))
-        + split_env_values(os.getenv("FEISHU_WEBHOOK_URL"))
-        + split_env_values(os.getenv("FEISHU_WEBHOOK"))
-    )
-    openclaw_webhooks = load_openclaw_feishu_config().get("webhooks", [])
-    if not isinstance(openclaw_webhooks, list):
-        openclaw_webhooks = []
-    candidates = [*webhooks, *env_webhooks, *openclaw_webhooks]
-    cleaned: list[str] = []
-    for item in candidates:
-        if not isinstance(item, str):
-            continue
-        url = item.strip()
-        if not url:
-            continue
-        if not url.startswith("https://"):
-            continue
-        if "replace-with-your-webhook" in url:
-            continue
-        if url not in cleaned:
-            cleaned.append(url)
-    return cleaned
-
-
-def resolve_feishu_app_config(cfg: dict[str, Any] | None = None) -> dict[str, str]:
-    openclaw_cfg = load_openclaw_feishu_config()
-    runtime_cfg = cfg if isinstance(cfg, dict) else {}
-    runtime_receive_id = str(runtime_cfg.get("feishu_receive_id", "") or "").strip()
-    runtime_receive_id_type = (
-        str(runtime_cfg.get("feishu_receive_id_type", "") or "").strip() if runtime_receive_id else ""
-    )
-    app_id = os.getenv("FEISHU_APP_ID", "").strip() or str(openclaw_cfg.get("app_id", "") or "").strip()
-    app_secret = os.getenv("FEISHU_APP_SECRET", "").strip() or str(
-        openclaw_cfg.get("app_secret", "") or ""
-    ).strip()
-    receive_id = os.getenv("FEISHU_RECEIVE_ID", "").strip() or str(
-        runtime_receive_id or openclaw_cfg.get("receive_id", "") or ""
-    ).strip()
-    receive_id_type = (
-        os.getenv("FEISHU_RECEIVE_ID_TYPE", "").strip()
-        or runtime_receive_id_type
-        or str(openclaw_cfg.get("receive_id_type", "") or "").strip()
-        or "chat_id"
-    )
-    if receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
-        receive_id_type = ""
-    return {
-        "app_id": app_id,
-        "app_secret": app_secret,
-        "receive_id": receive_id,
-        "receive_id_type": receive_id_type,
-        "config_path": str(openclaw_cfg.get("config_path", "") or ""),
-    }
-
-
-def resolve_feishu_app_target(cfg: dict[str, Any] | None = None) -> dict[str, str] | None:
-    target = resolve_feishu_app_config(cfg)
-    if (
-        not target.get("app_id")
-        or not target.get("app_secret")
-        or not target.get("receive_id")
-        or target.get("receive_id_type") not in VALID_FEISHU_RECEIVE_ID_TYPES
-    ):
-        return None
-    return target
-
-
-def feishu_config_diagnostic(cfg: dict[str, Any]) -> dict[str, Any]:
-    app_cfg = resolve_feishu_app_config(cfg)
-    return {
-        "webhook_count": len(resolve_webhooks(cfg)),
-        "has_app_id": bool(app_cfg["app_id"]),
-        "has_app_secret": bool(app_cfg["app_secret"]),
-        "has_receive_id": bool(app_cfg["receive_id"]),
-        "receive_id_type": app_cfg["receive_id_type"] if app_cfg["receive_id"] else "",
-        "receive_id_configured_in_runtime": bool(str(cfg.get("feishu_receive_id", "") or "").strip()),
-        "openclaw_config_path": app_cfg.get("config_path", ""),
-    }
-
-
 def has_event_api_key(cfg: dict[str, Any]) -> bool:
     return bool(resolve_event_api_key(cfg))
 
@@ -787,6 +761,7 @@ def configure_runtime(
     schedule: str | None = None,
     page_size: int | None = None,
     daily_summary_time: str | None = None,
+    channel: str | None = None,
 ) -> dict[str, Any]:
     cfg = load_runtime_config()
     if active is not None:
@@ -801,6 +776,12 @@ def configure_runtime(
         cleaned_time = daily_summary_time.strip()
         if cleaned_time:
             cfg["daily_summary_time"] = cleaned_time
+    if channel is not None:
+        delivery = cfg.get("delivery", {})
+        if not isinstance(delivery, dict):
+            delivery = {}
+        delivery["channel"] = channels.normalize_channel(channel)
+        cfg["delivery"] = delivery
 
     cfg = normalize_runtime_config(cfg)
     save_json(PUSH_CONFIG_PATH, cfg)
@@ -816,6 +797,36 @@ def configure_runtime(
         "lookback_minutes": schedule_lookback_minutes(cfg["schedule"]),
         "page_size": cfg["page_size"],
         "daily_summary_time": cfg["daily_summary_time"],
+        "delivery_channel": channels.configured_channel(cfg),
+    }
+
+
+def set_weixin_target(to: str, account_id: str) -> dict[str, Any]:
+    cleaned_to = to.strip()
+    cleaned_account_id = account_id.strip()
+    if not cleaned_to:
+        raise RuntimeError("微信 OpenClaw delivery.to 不能为空。")
+    if not cleaned_account_id:
+        raise RuntimeError("微信 OpenClaw delivery.accountId 不能为空。")
+    cfg = load_runtime_config()
+    delivery = cfg.get("delivery", {})
+    if not isinstance(delivery, dict):
+        delivery = {}
+    delivery["channel"] = openclaw_weixin.CHANNEL_ID
+    delivery["to"] = cleaned_to
+    delivery["accountId"] = cleaned_account_id
+    cfg["delivery"] = delivery
+    save_json(PUSH_CONFIG_PATH, normalize_runtime_config(cfg))
+    return {
+        "status": "ok",
+        "message": "已保存微信 OpenClaw 接收目标。",
+        "path": str(PUSH_CONFIG_PATH),
+        "delivery": {
+            "channel": openclaw_weixin.CHANNEL_ID,
+            "to": "<redacted>",
+            "accountId": "<redacted>",
+        },
+        "has_delivery_target": True,
     }
 
 
@@ -824,12 +835,17 @@ def set_feishu_target(receive_id: str, receive_id_type: str = "chat_id") -> dict
     cleaned_receive_id_type = (receive_id_type or "chat_id").strip()
     if not cleaned_receive_id:
         raise RuntimeError("飞书 receive_id 不能为空。")
-    if cleaned_receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
+    if cleaned_receive_id_type not in feishu_channel.VALID_RECEIVE_ID_TYPES:
         raise RuntimeError(
             f"不支持的飞书 receive_id_type：{cleaned_receive_id_type!r}。"
-            f"可选值：{feishu_receive_id_type_options_text()}。"
+            f"可选值：{feishu_channel.receive_id_type_options_text()}。"
         )
     cfg = load_runtime_config()
+    delivery = cfg.get("delivery", {})
+    if not isinstance(delivery, dict):
+        delivery = {}
+    delivery["channel"] = channels.FEISHU_CHANNEL
+    cfg["delivery"] = delivery
     cfg["feishu_receive_id"] = cleaned_receive_id
     cfg["feishu_receive_id_type"] = cleaned_receive_id_type
     save_json(PUSH_CONFIG_PATH, cfg)
@@ -839,7 +855,7 @@ def set_feishu_target(receive_id: str, receive_id_type: str = "chat_id") -> dict
         "path": str(PUSH_CONFIG_PATH),
         "receive_id_type": cleaned_receive_id_type,
         "has_receive_id": True,
-        "has_feishu_target": has_feishu_target(cfg),
+        "has_delivery_target": channels.has_target(normalize_runtime_config(cfg)),
     }
 
 
@@ -852,6 +868,11 @@ def set_feishu_webhook(url: str, *, append: bool = False) -> dict[str, Any]:
     if "replace-with-your-webhook" in cleaned:
         raise RuntimeError("飞书 Webhook URL 仍是占位符，请替换为真实地址。")
     cfg = load_runtime_config()
+    delivery = cfg.get("delivery", {})
+    if not isinstance(delivery, dict):
+        delivery = {}
+    delivery["channel"] = channels.FEISHU_CHANNEL
+    cfg["delivery"] = delivery
     existing = cfg.get("feishu_webhooks", [])
     if not isinstance(existing, list):
         existing = []
@@ -871,138 +892,9 @@ def set_feishu_webhook(url: str, *, append: bool = False) -> dict[str, Any]:
         "status": "ok",
         "message": "已追加飞书 Webhook URL。" if append else "已保存飞书 Webhook URL。",
         "path": str(PUSH_CONFIG_PATH),
-        "webhook_count": len(resolve_webhooks(cfg)),
-        "has_feishu_target": has_feishu_target(cfg),
+        "webhook_count": len(feishu_channel.resolve_webhooks(cfg)),
+        "has_delivery_target": channels.has_target(normalize_runtime_config(cfg)),
     }
-
-
-def feishu_missing_target_message(cfg: dict[str, Any] | None = None) -> str:
-    app_cfg = resolve_feishu_app_config(cfg)
-    if app_cfg["app_id"] or app_cfg["app_secret"]:
-        missing = []
-        if not app_cfg["app_id"]:
-            missing.append("App ID")
-        if not app_cfg["app_secret"]:
-            missing.append("App Secret")
-        if not app_cfg["receive_id"]:
-            missing.append("receive_id")
-        if app_cfg["receive_id"] and not app_cfg["receive_id_type"]:
-            missing.append("有效的 receive_id_type")
-        return (
-            "飞书自建应用配置不完整，缺少："
-            f"{', '.join(missing)}。"
-            "请提供缺失信息，或提供飞书 Webhook URL。"
-            "如果要推送到群聊，请提供群聊 chat_id/receive_id。"
-        )
-    return (
-        "尚未配置有效的飞书接收目标。请提供飞书 Webhook URL，"
-        "或提供飞书自建应用的 App ID、App Secret 和 receive_id。"
-        "如果要推送到群聊，请提供群聊 chat_id/receive_id。"
-    )
-
-
-def has_feishu_target(cfg: dict[str, Any]) -> bool:
-    return bool(resolve_webhooks(cfg) or resolve_feishu_app_target(cfg))
-
-
-def feishu_api_base() -> str:
-    return os.getenv("FEISHU_API_BASE", "https://open.feishu.cn/open-apis").rstrip("/")
-
-
-def post_json_request(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urlopen(req, timeout=30) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        detail = exc.read(2048).decode("utf-8", errors="replace") if exc.fp else ""
-        raise RuntimeError(f"飞书 API HTTP 错误 {exc.code}：{detail or exc.reason}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"飞书 API 请求失败：{exc.reason}") from exc
-    try:
-        return json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"飞书 API 返回的不是 JSON：{data[:300]}") from exc
-
-
-def fetch_feishu_tenant_access_token(app_id: str, app_secret: str) -> str:
-    parsed = post_json_request(
-        f"{feishu_api_base()}/auth/v3/tenant_access_token/internal",
-        {"app_id": app_id, "app_secret": app_secret},
-        {"Content-Type": "application/json; charset=utf-8"},
-    )
-    if parsed.get("code") != 0:
-        raise RuntimeError(f"飞书 tenant_access_token 获取失败：{parsed}")
-    token = str(parsed.get("tenant_access_token", "") or "")
-    if not token:
-        raise RuntimeError(f"飞书 token 响应缺少 tenant_access_token：{parsed}")
-    return token
-
-
-def post_to_feishu_app(target: dict[str, str], text: str) -> dict[str, Any]:
-    receive_id_type = target.get("receive_id_type", "")
-    if receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
-        raise RuntimeError(
-            f"不支持的飞书 receive_id_type：{receive_id_type!r}。"
-            f"可选值：{feishu_receive_id_type_options_text()}。"
-        )
-    token = fetch_feishu_tenant_access_token(target["app_id"], target["app_secret"])
-    content = json.dumps({"text": text}, ensure_ascii=False)
-    parsed = post_json_request(
-        f"{feishu_api_base()}/im/v1/messages?receive_id_type={receive_id_type}",
-        {
-            "receive_id": target["receive_id"],
-            "msg_type": "text",
-            "content": content,
-        },
-        {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-    )
-    if parsed.get("code") != 0:
-        raise RuntimeError(f"飞书自建应用拒绝了本次消息：{parsed}")
-    return parsed
-
-
-def post_text_to_feishu(cfg: dict[str, Any], text: str, dry_run: bool = False) -> list[dict[str, Any]]:
-    if dry_run:
-        return [{"method": "dry-run", "message": "试运行未实际发送飞书消息。", "result": {"ok": True}}]
-
-    webhooks = resolve_webhooks(cfg)
-    if webhooks:
-        results: list[dict[str, Any]] = []
-        for url in webhooks:
-            try:
-                result = post_to_feishu(url, text)
-            except Exception as exc:  # noqa: BLE001
-                results.append({"method": "webhook", "webhook": url, "ok": False, "error": str(exc)})
-            else:
-                results.append({"method": "webhook", "message": "飞书 Webhook 推送成功。", "webhook": url, "ok": True, "result": result})
-        failed_results = [item for item in results if not item.get("ok")]
-        if failed_results:
-            errors = "; ".join(str(item.get("error", "")) for item in results if item.get("error"))
-            raise RuntimeError(
-                f"飞书 Webhook 推送部分失败：{len(failed_results)}/{len(results)} 个目标失败：{errors}"
-            )
-        return results
-
-    app_target = resolve_feishu_app_target(cfg)
-    if app_target:
-        receive_id_type = app_target.get("receive_id_type", "chat_id")
-        receive_id = app_target.get("receive_id", "")
-        return [
-            {
-                "method": "app",
-                "message": "飞书自建应用推送成功。",
-                "receive_id_type": receive_id_type,
-                "receive_id": "<redacted>" if receive_id else "",
-                "result": post_to_feishu_app(app_target, text),
-            }
-        ]
-
-    raise RuntimeError(feishu_missing_target_message(cfg))
 
 
 def _event_is_new(event_id: str, sent_index: dict[str, str], cutoff: datetime) -> bool:
@@ -1055,7 +947,206 @@ def record_history_batch(
     return indexed_events, batch_time
 
 
-def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def compact_batch_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "index": event.get("index"),
+        "eventId": str(event.get("eventId", "") or ""),
+        "compliantTitle": event.get("compliantTitle", ""),
+        "eventPublishDate": event.get("eventPublishDate", ""),
+        "signalLevel": event.get("signalLevel", ""),
+        "matched_keywords": event.get("matched_keywords", []),
+    }
+
+
+def event_ref_keyword(batch: dict[str, Any], event: dict[str, Any]) -> str:
+    matched = event.get("matched_keywords")
+    if isinstance(matched, list):
+        for item in matched:
+            keyword = str(item or "").strip()
+            if keyword:
+                return keyword
+    keywords = batch.get("keywords")
+    if isinstance(keywords, list):
+        for item in keywords:
+            keyword = str(item or "").strip()
+            if keyword:
+                return keyword
+    keyword_label = str(batch.get("keyword_label", "") or "").strip()
+    return split_keywords(keyword_label)[0] if split_keywords(keyword_label) else "AI"
+
+
+def resolve_event_ref_from_history(query: str, history: dict[str, Any]) -> dict[str, Any]:
+    ref = parse_event_ref(query)
+    batches = history.get("batches", [])
+    if not isinstance(batches, list) or not batches:
+        return {
+            "status": "not_found",
+            "reason": "no_push_history",
+            "message": "未在最近的推送记录中找到该事件；当前没有可用推送批次。",
+            "ref": ref,
+            "latest_events": [],
+        }
+
+    batch_offset = int(ref.get("batch_offset", 0) or 0)
+    if batch_offset >= len(batches):
+        return {
+            "status": "not_found",
+            "reason": "batch_not_found",
+            "message": "未在最近的推送记录中找到该事件；指定的历史批次不存在。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in batches[0].get("events", [])],
+        }
+
+    batch = batches[batch_offset]
+    events = batch.get("events", [])
+    if not isinstance(events, list) or not events:
+        return {
+            "status": "not_found",
+            "reason": "empty_batch",
+            "message": "未在最近的推送记录中找到该事件；该批次没有事件。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in batches[0].get("events", [])],
+        }
+
+    index = ref.get("index")
+    if isinstance(index, int) and index > 0:
+        for pos, event in enumerate(events, start=1):
+            event_index = event.get("index", pos)
+            try:
+                event_index_int = int(event_index)
+            except (TypeError, ValueError):
+                event_index_int = pos
+            if event_index_int == index:
+                return {
+                    "status": "matched",
+                    "match_type": "index",
+                    "ref": ref,
+                    "batch": {
+                        "push_time": batch.get("push_time", ""),
+                        "keyword_label": batch.get("keyword_label", ""),
+                        "source": batch.get("source", ""),
+                        "batch_offset": batch_offset,
+                    },
+                    "keyword": event_ref_keyword(batch, event),
+                    "event": event,
+                }
+        return {
+            "status": "not_found",
+            "reason": "index_not_found",
+            "message": f"未在最近的推送记录中找到第 {index} 条事件。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in events],
+        }
+
+    title_keyword = str(ref.get("title_keyword", "") or "").casefold()
+    if title_keyword:
+        candidates: list[dict[str, Any]] = []
+        for event in events:
+            haystack = "\n".join(
+                str(event.get(key, "") or "")
+                for key in ("compliantTitle", "summary", "original_summary")
+            ).casefold()
+            if title_keyword in haystack:
+                candidates.append(event)
+        if len(candidates) == 1:
+            event = candidates[0]
+            return {
+                "status": "matched",
+                "match_type": "title_keyword",
+                "ref": ref,
+                "batch": {
+                    "push_time": batch.get("push_time", ""),
+                    "keyword_label": batch.get("keyword_label", ""),
+                    "source": batch.get("source", ""),
+                    "batch_offset": batch_offset,
+                },
+                "keyword": event_ref_keyword(batch, event),
+                "event": event,
+            }
+        if len(candidates) > 1:
+            return {
+                "status": "ambiguous",
+                "reason": "multiple_title_matches",
+                "message": "在最近推送中匹配到多条事件，请指定序号。",
+                "ref": ref,
+                "candidates": [compact_batch_event(item) for item in candidates],
+            }
+
+    return {
+        "status": "not_found",
+        "reason": "no_match",
+        "message": "该问题不在最近推送事件范围内；如需继续，我会显式说明并改用其他数据源生成报告。",
+        "ref": ref,
+        "latest_events": [compact_batch_event(item) for item in events],
+    }
+
+
+def detail_from_history_ref(query: str) -> dict[str, Any]:
+    cfg = load_runtime_config()
+    history = load_history(retention_days=cfg["retention_days"])
+    prune_history(history, retention_days=cfg["retention_days"])
+    resolved = resolve_event_ref_from_history(query, history)
+    if resolved.get("status") != "matched":
+        return resolved
+
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
+    apply_runtime_event_api_key(cfg, reset_client=True)
+
+    event = resolved.get("event", {})
+    event_id = str(event.get("eventId", "") or "")
+    if not event_id:
+        return {
+            "status": "not_found",
+            "reason": "missing_event_id",
+            "message": "最近推送记录中找到了该事件，但缺少 eventId，无法调用 deepseekdata 详情接口。",
+            "resolved": resolved,
+        }
+    keyword = str(resolved.get("keyword", "") or "AI")
+    detail_func = getattr(_event_query, "get_event_detail")
+    detail = detail_func(keyword=keyword, event_id=event_id)
+    if not detail:
+        return {
+            "status": "not_found",
+            "reason": "detail_not_found",
+            "message": "已在最近推送中找到该事件，但 deepseekdata 详情接口未返回详情。",
+            "resolved": {
+                **resolved,
+                "event": compact_batch_event(event),
+            },
+        }
+    return {
+        "status": "ok",
+        "source": "deepseekdata_api",
+        "message": "已从最近推送事件中匹配，并通过 deepseekdata API 获取详情。",
+        "keyword": keyword,
+        "eventId": event_id,
+        "resolved": {
+            **resolved,
+            "event": compact_batch_event(event),
+        },
+        "detail": detail,
+    }
+
+
+def _openclaw_announce_delivery_result(cfg: dict[str, Any], text: str) -> list[dict[str, Any]]:
+    chunks = openclaw_weixin.chunk_text(text)
+    return [
+        {
+            "method": "openclaw-announce",
+            "channel": openclaw_weixin.CHANNEL_ID,
+            "message": "OpenClaw cron/announce will deliver this final answer to the configured Weixin target.",
+            "delivery": openclaw_weixin.delivery(cfg, redacted=True),
+            "result": {
+                "ok": True,
+                "chunks": len(chunks),
+                "text_chunk_limit": openclaw_weixin.TEXT_CHUNK_LIMIT,
+            },
+        }
+    ]
+
+
+def run_once(force: bool = False, dry_run: bool = False, openclaw_output: bool = False) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
     retention_days = cfg["retention_days"]
@@ -1077,8 +1168,8 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    if not has_feishu_target(cfg) and not dry_run:
-        raise RuntimeError(feishu_missing_target_message(cfg))
+    if not channels.has_target(cfg) and not dry_run:
+        raise RuntimeError(channels.missing_target_message(cfg))
 
     lookback_minutes = schedule_lookback_minutes(cfg["schedule"])
     page_size = cfg["page_size"]
@@ -1124,6 +1215,7 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "message": "本次没有发现新的事件，不需要推送。",
             "run_time": run_time,
             "lookback_minutes": lookback_minutes,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     text = build_push_text(
@@ -1135,7 +1227,10 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         totals_by_keyword=result.get("totals_by_keyword", {}),
     )
 
-    feishu_results = post_text_to_feishu(cfg, text, dry_run=dry_run)
+    if openclaw_output and not dry_run and channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        delivery_results = _openclaw_announce_delivery_result(cfg, text)
+    else:
+        delivery_results = channels.send(cfg, text, dry_run=dry_run)
     real_sent = not dry_run
 
     indexed_events, batch_time = record_history_batch(
@@ -1163,7 +1258,9 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         "lookback_minutes": lookback_minutes,
         "run_time": run_time,
         "last_push_time": batch_time if real_sent else "",
-        "feishu": feishu_results,
+        "delivery": delivery_results,
+        "feishu": delivery_results if channels.configured_channel(cfg) == channels.FEISHU_CHANNEL else [],
+        "openclaw_announce_text": text if openclaw_output else "",
         "events": indexed_events,
     }
 
@@ -1175,6 +1272,8 @@ def manual_push(
     page_size: int | None = None,
     dry_run: bool = False,
     no_feishu: bool = False,
+    no_delivery: bool = False,
+    openclaw_output: bool = False,
 ) -> dict[str, Any]:
     cfg = load_runtime_config()
     apply_runtime_event_api_key(cfg, reset_client=True)
@@ -1194,8 +1293,9 @@ def manual_push(
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    if not no_feishu and not dry_run and not has_feishu_target(cfg):
-        raise RuntimeError(feishu_missing_target_message(cfg))
+    delivery_disabled = no_delivery or no_feishu
+    if not delivery_disabled and not dry_run and not channels.has_target(cfg):
+        raise RuntimeError(channels.missing_target_message(cfg))
 
     result = search_events_for_keywords(
         keywords=resolved_keywords,
@@ -1222,6 +1322,7 @@ def manual_push(
             "reason": "no_events",
             "message": "没有查询到可推送的事件。",
             "run_time": run_time,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
             "events": [],
         }
 
@@ -1235,18 +1336,20 @@ def manual_push(
         totals_by_keyword=result.get("totals_by_keyword", {}),
     )
 
-    feishu_results: list[dict[str, Any]] = []
-    if no_feishu:
-        feishu_results.append({"method": "disabled", "message": "已按参数跳过飞书发送。", "result": {"ok": True}})
+    delivery_results: list[dict[str, Any]] = []
+    if delivery_disabled:
+        delivery_results.append({"method": "disabled", "message": "已按参数跳过消息投递。", "result": {"ok": True}})
+    elif openclaw_output and not dry_run and channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        delivery_results = _openclaw_announce_delivery_result(cfg, text)
     else:
-        feishu_results = post_text_to_feishu(cfg, text, dry_run=dry_run)
-    real_sent = not dry_run and not no_feishu
+        delivery_results = channels.send(cfg, text, dry_run=dry_run)
+    real_sent = not dry_run and not delivery_disabled
 
     indexed_events, batch_time = record_history_batch(
         history,
         keywords=resolved_keywords,
         events=compacted,
-        source="manual" if real_sent else ("manual_no_feishu" if no_feishu else "manual_dry_run"),
+        source="manual" if real_sent else ("manual_no_delivery" if delivery_disabled else "manual_dry_run"),
         retention_days=retention_days,
         update_sent_index=real_sent,
         update_last_push_time=real_sent,
@@ -1267,13 +1370,15 @@ def manual_push(
         "pushed": len(indexed_events),
         "run_time": run_time,
         "last_push_time": batch_time if real_sent else "",
-        "feishu": feishu_results,
+        "delivery": delivery_results,
+        "feishu": delivery_results if channels.configured_channel(cfg) == channels.FEISHU_CHANNEL else [],
+        "openclaw_announce_text": text if openclaw_output else "",
         "text": text,
         "events": indexed_events,
     }
 
 
-def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def run_daily(force: bool = False, dry_run: bool = False, openclaw_output: bool = False) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
     if not cfg["active"] and not force:
@@ -1281,13 +1386,14 @@ def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "status": "skipped",
             "reason": "daily_summary_inactive",
             "message": "运行时推送未开启，本次未执行每日统计。",
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    if not has_feishu_target(cfg) and not dry_run:
-        raise RuntimeError(feishu_missing_target_message(cfg))
+    if not channels.has_target(cfg) and not dry_run:
+        raise RuntimeError(channels.missing_target_message(cfg))
 
     keywords = validate_keywords(cfg.get("keywords"))
     keyword = keywords_label(keywords)
@@ -1298,11 +1404,22 @@ def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "reason": "no_daily_events",
             "message": "过去 24 小时没有查询到可统计的事件。",
             "summary": summary,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     text = build_daily_summary_text(keyword_label=keyword, result=summary)
-    feishu_results = post_text_to_feishu(cfg, text, dry_run=dry_run)
-    return {"status": "ok", "message": "每日事件统计已生成并发送。", "summary": summary, "feishu": feishu_results}
+    if openclaw_output and not dry_run and channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        delivery_results = _openclaw_announce_delivery_result(cfg, text)
+    else:
+        delivery_results = channels.send(cfg, text, dry_run=dry_run)
+    return {
+        "status": "ok",
+        "message": "每日事件统计已生成并发送。",
+        "summary": summary,
+        "delivery": delivery_results,
+        "feishu": delivery_results if channels.configured_channel(cfg) == channels.FEISHU_CHANNEL else [],
+        "openclaw_announce_text": text if openclaw_output else "",
+    }
 
 
 def _is_hhmm(value: str) -> bool:
@@ -1317,12 +1434,85 @@ def _is_hhmm(value: str) -> bool:
     return 0 <= hour <= 23 and 0 <= minute <= 59
 
 
+def _install_openclaw_cron_jobs(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    def redact_output(text: str) -> str:
+        redacted = str(text or "")
+        for job in jobs:
+            delivery = job.get("delivery") if isinstance(job, dict) else {}
+            if not isinstance(delivery, dict):
+                continue
+            for key in ("to", "accountId"):
+                value = str(delivery.get(key, "") or "")
+                if value:
+                    redacted = redacted.replace(value, "<redacted>")
+        return redacted
+
+    openclaw_bin = shutil.which("openclaw")
+    if not openclaw_bin:
+        return {"attempted": False, "installed": False, "reason": "openclaw_cli_not_found"}
+
+    installed: list[dict[str, Any]] = []
+    for job in jobs:
+        payload = json.dumps(job, ensure_ascii=False)
+        proc = subprocess.run(
+            [openclaw_bin, "cron", "add", "--json", payload],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return {
+                "attempted": True,
+                "installed": False,
+                "failed_job": job.get("name", ""),
+                "error": redact_output(proc.stderr or proc.stdout or "openclaw cron add failed").strip(),
+            }
+        installed.append({"name": job.get("name", ""), "stdout": redact_output(proc.stdout).strip()})
+
+    return {"attempted": True, "installed": True, "jobs": installed}
+
+
 def install_schedule(task_name: str | None = None) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
     resolved_name = (task_name or cfg.get("task_name") or DEFAULT_TASK_NAME).strip()
     if not resolved_name:
         resolved_name = DEFAULT_TASK_NAME
+
+    if channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        if not channels.has_target(cfg):
+            raise RuntimeError(channels.missing_target_message(cfg))
+        python_bin = shlex.quote(sys.executable)
+        script = shlex.quote(str(Path(__file__).resolve()))
+        main_cmd = f"{python_bin} {script} run-once --openclaw-output"
+        daily_cmd = f"{python_bin} {script} run-daily-summary --openclaw-output" if cfg["active"] else None
+        daily_cron = None
+        if cfg["active"]:
+            hh, mm = cfg["daily_summary_time"].split(":")
+            daily_cron = f"{int(mm)} {int(hh)} * * *"
+        spec = openclaw_weixin.openclaw_cron_spec(
+            cfg,
+            task_name=resolved_name,
+            command=main_cmd,
+            schedule_cron=str(SCHEDULE_PRESETS[cfg["schedule"]]["cron"]),
+            daily_command=daily_cmd,
+            daily_cron=daily_cron,
+        )
+        install_result = _install_openclaw_cron_jobs(spec["jobs"])
+        return {
+            "status": "ok",
+            "message": (
+                "微信渠道使用 OpenClaw cron/announce 投递；已通过本机 openclaw CLI 安装调度任务。"
+                if install_result.get("installed")
+                else "微信渠道使用 OpenClaw cron/announce 投递；已生成符合 OpenClaw cron add 的调度规格。"
+            ),
+            "task_name": resolved_name,
+            "schedule": cfg["schedule"],
+            "schedule_label": schedule_label(cfg["schedule"]),
+            "available_schedules": schedule_options_list(),
+            "lookback_minutes": schedule_lookback_minutes(cfg["schedule"]),
+            "openclaw_cli": install_result,
+            **openclaw_weixin.redact_cron_spec(spec),
+        }
 
     return install_unix_cron(resolved_name, cfg["schedule"], cfg["active"], cfg["daily_summary_time"])
 
@@ -1419,6 +1609,16 @@ def uninstall_schedule(task_name: str | None = None) -> dict[str, Any]:
     if not resolved_name:
         resolved_name = DEFAULT_TASK_NAME
 
+    if channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        cfg["active"] = False
+        save_json(PUSH_CONFIG_PATH, cfg)
+        return {
+            "status": "ok",
+            "message": "已关闭运行时推送。微信渠道的 OpenClaw cron/announce 任务请在 Arkclaw/OpenClaw 平台停用。",
+            "scheduler": "openclaw-cron",
+            "task_name": resolved_name,
+        }
+
     marker_prefix = f"# EVENT_INTELLIGENCE:{resolved_name}:"
     lines = _read_crontab()
     cleaned = _drop_marked_cron(lines, marker_prefix)
@@ -1438,14 +1638,7 @@ def redacted_runtime_config(cfg: dict[str, Any]) -> dict[str, Any]:
     for key in ("event_intel_api_key", "api_key", "deepseekdata_api_key"):
         if str(safe_cfg.get(key, "") or "").strip():
             safe_cfg[key] = "<redacted>"
-    webhooks = safe_cfg.get("feishu_webhooks")
-    if isinstance(webhooks, list):
-        safe_cfg["feishu_webhooks"] = ["<redacted>" for item in webhooks if str(item or "").strip()]
-    elif str(webhooks or "").strip():
-        safe_cfg["feishu_webhooks"] = ["<redacted>"]
-    if str(safe_cfg.get("feishu_receive_id", "") or "").strip():
-        safe_cfg["feishu_receive_id"] = "<redacted>"
-    return safe_cfg
+    return channels.redact_config(safe_cfg)
 
 
 def status() -> dict[str, Any]:
@@ -1458,7 +1651,8 @@ def status() -> dict[str, Any]:
         "status": "ok",
         "message": schedule_hint_message("运行时状态如下。", cfg["schedule"]),
         "push_config": safe_cfg,
-        "feishu": feishu_config_diagnostic(cfg),
+        "delivery": channels.diagnostic(cfg),
+        "feishu": feishu_channel.diagnostic(cfg),
         "event_api": {
             "has_key": has_event_api_key(cfg),
             "stored_in_config": bool(
@@ -1562,7 +1756,10 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 
 def cmd_run_once(args: argparse.Namespace) -> int:
-    result = run_once(force=args.force, dry_run=args.dry_run)
+    result = run_once(force=args.force, dry_run=args.dry_run, openclaw_output=args.openclaw_output)
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     if not args.quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1575,13 +1772,21 @@ def cmd_manual_push(args: argparse.Namespace) -> int:
         page_size=args.page_size or None,
         dry_run=args.dry_run,
         no_feishu=args.no_feishu,
+        no_delivery=args.no_delivery,
+        openclaw_output=args.openclaw_output,
     )
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_run_daily(args: argparse.Namespace) -> int:
-    result = run_daily(force=args.force, dry_run=args.dry_run)
+    result = run_daily(force=args.force, dry_run=args.dry_run, openclaw_output=args.openclaw_output)
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     if not args.quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1609,7 +1814,14 @@ def cmd_configure(args: argparse.Namespace) -> int:
         schedule=args.schedule,
         page_size=args.page_size,
         daily_summary_time=args.daily_summary_time,
+        channel=args.channel,
     )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_set_weixin_target(args: argparse.Namespace) -> int:
+    result = set_weixin_target(args.to, args.account_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -1644,6 +1856,12 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_status(_: argparse.Namespace) -> int:
     print(json.dumps(status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_detail_from_ref(args: argparse.Namespace) -> int:
+    result = detail_from_history_ref(args.query)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1721,23 +1939,27 @@ def build_parser() -> argparse.ArgumentParser:
     run_once_parser.add_argument("--force", action="store_true")
     run_once_parser.add_argument("--dry-run", action="store_true")
     run_once_parser.add_argument("--quiet", action="store_true")
+    run_once_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     run_once_parser.set_defaults(func=cmd_run_once)
 
     manual_parser = sub.add_parser(
         "manual-push",
-        help="手动拉取事件、推送飞书并记录历史",
+        help="手动拉取事件、投递到当前消息渠道并记录历史",
     )
     manual_parser.add_argument("--keywords", default="", help="多个关键词用逗号、顿号、分号或斜杠分隔；最多 3 个")
     manual_parser.add_argument("--minutes", type=int, default=60)
     manual_parser.add_argument("--page-size", type=int, default=0)
     manual_parser.add_argument("--dry-run", action="store_true")
+    manual_parser.add_argument("--no-delivery", action="store_true", help="只查询和记录历史，不投递到任何消息渠道")
     manual_parser.add_argument("--no-feishu", action="store_true")
+    manual_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     manual_parser.set_defaults(func=cmd_manual_push)
 
     run_daily_parser = sub.add_parser("run-daily-summary", help="执行一次每日统计")
     run_daily_parser.add_argument("--force", action="store_true")
     run_daily_parser.add_argument("--dry-run", action="store_true")
     run_daily_parser.add_argument("--quiet", action="store_true")
+    run_daily_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     run_daily_parser.set_defaults(func=cmd_run_daily)
 
     key_parser = sub.add_parser("set-api-key", help="保存 deepseekdata API key 到运行时配置")
@@ -1754,14 +1976,20 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("--schedule", default=None, help=f"可选：{schedule_options_text()}")
     configure_parser.add_argument("--page-size", type=int, default=None)
     configure_parser.add_argument("--daily-summary-time", default=None)
+    configure_parser.add_argument("--channel", default=None, help="推送渠道：openclaw-weixin 或 feishu")
     configure_parser.set_defaults(func=cmd_configure)
+
+    weixin_target_parser = sub.add_parser("set-weixin-target", help="保存 OpenClaw 微信渠道接收目标")
+    weixin_target_parser.add_argument("--to", required=True, help="OpenClaw 微信投递目标，通常形如 xxx@im.wechat")
+    weixin_target_parser.add_argument("--account-id", required=True, help="扫码绑定后的 OpenClaw 微信 accountId")
+    weixin_target_parser.set_defaults(func=cmd_set_weixin_target)
 
     feishu_target_parser = sub.add_parser("set-feishu-target", help="保存飞书自建应用接收目标")
     feishu_target_parser.add_argument("--receive-id", required=True)
     feishu_target_parser.add_argument(
         "--receive-id-type",
         default="chat_id",
-        help=f"可选：{feishu_receive_id_type_options_text()}",
+        help=f"可选：{feishu_channel.receive_id_type_options_text()}",
     )
     feishu_target_parser.set_defaults(func=cmd_set_feishu_target)
 
@@ -1786,6 +2014,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = sub.add_parser("status", help="查看运行时状态")
     status_parser.set_defaults(func=cmd_status)
+
+    detail_parser = sub.add_parser(
+        "detail-from-ref",
+        help="从最近推送历史中解析用户问法，并调用 deepseekdata 获取事件详情",
+    )
+    detail_parser.add_argument("--query", required=True, help="用户原始问句，例如：第3条详细看看")
+    detail_parser.set_defaults(func=cmd_detail_from_ref)
 
     run_loop_parser = sub.add_parser("run-loop", help="在当前进程中循环运行")
     run_loop_parser.add_argument("--force", action="store_true")
