@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -9,27 +10,56 @@ from urllib.request import Request, urlopen
 from runtime_config import load_openclaw_feishu_config, split_env_values
 
 VALID_RECEIVE_ID_TYPES = {"chat_id", "open_id", "user_id", "union_id", "email"}
+MAX_PLAIN_TEXT_CHARS = 900
+
+_SEPARATOR_LINE_RE = re.compile(r"^\s*(?:[#>*_`~\s]*)?[━─\-_=—]{6,}(?:\s*[*_`~]*)?\s*$")
+_SEPARATOR_RUN_RE = re.compile(r"[━─\-_=—]{8,}")
+_TITLE_SEPARATOR_RUN_RE = re.compile(r"[━─\-_=—]{3,}")
+_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
 
 
 def receive_id_type_options_text() -> str:
     return "、".join(sorted(VALID_RECEIVE_ID_TYPES))
 
 
+def _clean_card_title(text: str) -> str:
+    title = _MARKDOWN_HEADING_RE.sub("", text.strip()).strip()
+    title = title.strip("*_`~ ")
+    title = _TITLE_SEPARATOR_RUN_RE.sub("", title).strip()
+    return title or "事件推送"
+
+
+def _is_separator_line(line: str) -> bool:
+    return bool(_SEPARATOR_LINE_RE.fullmatch(line))
+
+
+def _clean_plain_text(line: str) -> str:
+    cleaned = _SEPARATOR_RUN_RE.sub("——", line).strip()
+    return cleaned if cleaned else " "
+
+
+def _plain_text_chunks(text: str) -> list[str]:
+    if len(text) <= MAX_PLAIN_TEXT_CHARS:
+        return [text]
+    return [text[idx : idx + MAX_PLAIN_TEXT_CHARS] for idx in range(0, len(text), MAX_PLAIN_TEXT_CHARS)]
+
+
 def build_interactive_card(text: str) -> dict[str, Any]:
     lines = text.splitlines()
-    title = lines[0].strip() if lines and lines[0].strip() else "事件推送"
+    title = _clean_card_title(lines[0]) if lines and lines[0].strip() else "事件推送"
     content_lines = lines[1:] if lines else []
     elements: list[dict[str, Any]] = []
     for line in content_lines:
-        if line == "━━━━━━━━━━━━━━━━━━━━━━━━":
+        if _is_separator_line(line):
             elements.append({"tag": "hr"})
             continue
-        elements.append(
-            {
-                "tag": "div",
-                "text": {"tag": "plain_text", "content": line if line else " "},
-            }
-        )
+        for chunk in _plain_text_chunks(_clean_plain_text(line)):
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {"tag": "plain_text", "content": chunk},
+                }
+            )
     return {
         "config": {"wide_screen_mode": True},
         "header": {
