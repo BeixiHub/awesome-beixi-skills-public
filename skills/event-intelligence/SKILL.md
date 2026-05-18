@@ -146,6 +146,14 @@ python push_runtime.py status
 python push_runtime.py install-schedule
 ```
 
+OpenClaw 微信调度必须使用 `sessionTarget: "isolated"`、`payload.kind: "agentTurn"` 和 `delivery.mode: "announce"`。`delivery` 必须同时包含：
+
+- `channel: "openclaw-weixin"`
+- `to: "<xxx@im.wechat>"`
+- `accountId: "<扫码登录后的 accountId>"`
+
+`install-schedule` 会让 cron job 执行 `run-once --openclaw-output` / `run-daily-summary --openclaw-output`。该输出模式只打印要投递给微信用户的结构化文本；无新事件时打印 `NO_REPLY`，让 OpenClaw 按 cron/announce 语义抑制空消息。不要把微信默认调度降级为本机 crontab。
+
 该命令生成 OpenClaw cron/announce 调度规格，由 Arkclaw/OpenClaw 平台安装和执行。它不写入本机 crontab，因为本机 crontab 无法保证微信扫码账号投递目标。
 
 停止时：

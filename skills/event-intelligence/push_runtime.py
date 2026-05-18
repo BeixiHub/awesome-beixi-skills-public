@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import shlex
 import subprocess
 import sys
@@ -30,6 +31,7 @@ STATE_DIR = SCRIPT_DIR / "state"
 PUSH_CONFIG_PATH = STATE_DIR / "push_config.json"
 HISTORY_PATH = STATE_DIR / "push_history.json"
 DEFAULT_TASK_NAME = "OpenClaw-Event-Intelligence-Push"
+OPENCLAW_NO_REPLY = openclaw_weixin.NO_REPLY
 MAX_KEYWORDS = 3
 SIGNAL_LEVEL_PRIORITY = {"S级": 0, "A级": 1, "B级": 2, "C级": 3}
 DEFAULT_SCHEDULE = "5m"
@@ -1127,7 +1129,24 @@ def detail_from_history_ref(query: str) -> dict[str, Any]:
     }
 
 
-def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def _openclaw_announce_delivery_result(cfg: dict[str, Any], text: str) -> list[dict[str, Any]]:
+    chunks = openclaw_weixin.chunk_text(text)
+    return [
+        {
+            "method": "openclaw-announce",
+            "channel": openclaw_weixin.CHANNEL_ID,
+            "message": "OpenClaw cron/announce will deliver this final answer to the configured Weixin target.",
+            "delivery": openclaw_weixin.delivery(cfg, redacted=True),
+            "result": {
+                "ok": True,
+                "chunks": len(chunks),
+                "text_chunk_limit": openclaw_weixin.TEXT_CHUNK_LIMIT,
+            },
+        }
+    ]
+
+
+def run_once(force: bool = False, dry_run: bool = False, openclaw_output: bool = False) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
     retention_days = cfg["retention_days"]
@@ -1196,6 +1215,7 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "message": "本次没有发现新的事件，不需要推送。",
             "run_time": run_time,
             "lookback_minutes": lookback_minutes,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     text = build_push_text(
@@ -1207,7 +1227,10 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         totals_by_keyword=result.get("totals_by_keyword", {}),
     )
 
-    delivery_results = channels.send(cfg, text, dry_run=dry_run)
+    if openclaw_output and not dry_run and channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        delivery_results = _openclaw_announce_delivery_result(cfg, text)
+    else:
+        delivery_results = channels.send(cfg, text, dry_run=dry_run)
     real_sent = not dry_run
 
     indexed_events, batch_time = record_history_batch(
@@ -1237,6 +1260,7 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         "last_push_time": batch_time if real_sent else "",
         "delivery": delivery_results,
         "feishu": delivery_results if channels.configured_channel(cfg) == channels.FEISHU_CHANNEL else [],
+        "openclaw_announce_text": text if openclaw_output else "",
         "events": indexed_events,
     }
 
@@ -1249,6 +1273,7 @@ def manual_push(
     dry_run: bool = False,
     no_feishu: bool = False,
     no_delivery: bool = False,
+    openclaw_output: bool = False,
 ) -> dict[str, Any]:
     cfg = load_runtime_config()
     apply_runtime_event_api_key(cfg, reset_client=True)
@@ -1297,6 +1322,7 @@ def manual_push(
             "reason": "no_events",
             "message": "没有查询到可推送的事件。",
             "run_time": run_time,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
             "events": [],
         }
 
@@ -1313,6 +1339,8 @@ def manual_push(
     delivery_results: list[dict[str, Any]] = []
     if delivery_disabled:
         delivery_results.append({"method": "disabled", "message": "已按参数跳过消息投递。", "result": {"ok": True}})
+    elif openclaw_output and not dry_run and channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        delivery_results = _openclaw_announce_delivery_result(cfg, text)
     else:
         delivery_results = channels.send(cfg, text, dry_run=dry_run)
     real_sent = not dry_run and not delivery_disabled
@@ -1344,12 +1372,13 @@ def manual_push(
         "last_push_time": batch_time if real_sent else "",
         "delivery": delivery_results,
         "feishu": delivery_results if channels.configured_channel(cfg) == channels.FEISHU_CHANNEL else [],
+        "openclaw_announce_text": text if openclaw_output else "",
         "text": text,
         "events": indexed_events,
     }
 
 
-def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def run_daily(force: bool = False, dry_run: bool = False, openclaw_output: bool = False) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
     if not cfg["active"] and not force:
@@ -1357,6 +1386,7 @@ def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "status": "skipped",
             "reason": "daily_summary_inactive",
             "message": "运行时推送未开启，本次未执行每日统计。",
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     if not has_event_api_key(cfg):
@@ -1374,16 +1404,21 @@ def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "reason": "no_daily_events",
             "message": "过去 24 小时没有查询到可统计的事件。",
             "summary": summary,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     text = build_daily_summary_text(keyword_label=keyword, result=summary)
-    delivery_results = channels.send(cfg, text, dry_run=dry_run)
+    if openclaw_output and not dry_run and channels.configured_channel(cfg) == openclaw_weixin.CHANNEL_ID:
+        delivery_results = _openclaw_announce_delivery_result(cfg, text)
+    else:
+        delivery_results = channels.send(cfg, text, dry_run=dry_run)
     return {
         "status": "ok",
         "message": "每日事件统计已生成并发送。",
         "summary": summary,
         "delivery": delivery_results,
         "feishu": delivery_results if channels.configured_channel(cfg) == channels.FEISHU_CHANNEL else [],
+        "openclaw_announce_text": text if openclaw_output else "",
     }
 
 
@@ -1399,6 +1434,43 @@ def _is_hhmm(value: str) -> bool:
     return 0 <= hour <= 23 and 0 <= minute <= 59
 
 
+def _install_openclaw_cron_jobs(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    def redact_output(text: str) -> str:
+        redacted = str(text or "")
+        for job in jobs:
+            delivery = job.get("delivery") if isinstance(job, dict) else {}
+            if not isinstance(delivery, dict):
+                continue
+            for key in ("to", "accountId"):
+                value = str(delivery.get(key, "") or "")
+                if value:
+                    redacted = redacted.replace(value, "<redacted>")
+        return redacted
+
+    openclaw_bin = shutil.which("openclaw")
+    if not openclaw_bin:
+        return {"attempted": False, "installed": False, "reason": "openclaw_cli_not_found"}
+
+    installed: list[dict[str, Any]] = []
+    for job in jobs:
+        payload = json.dumps(job, ensure_ascii=False)
+        proc = subprocess.run(
+            [openclaw_bin, "cron", "add", "--json", payload],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return {
+                "attempted": True,
+                "installed": False,
+                "failed_job": job.get("name", ""),
+                "error": redact_output(proc.stderr or proc.stdout or "openclaw cron add failed").strip(),
+            }
+        installed.append({"name": job.get("name", ""), "stdout": redact_output(proc.stdout).strip()})
+
+    return {"attempted": True, "installed": True, "jobs": installed}
+
+
 def install_schedule(task_name: str | None = None) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
@@ -1411,31 +1483,35 @@ def install_schedule(task_name: str | None = None) -> dict[str, Any]:
             raise RuntimeError(channels.missing_target_message(cfg))
         python_bin = shlex.quote(sys.executable)
         script = shlex.quote(str(Path(__file__).resolve()))
-        main_cmd = f"{python_bin} {script} run-once --quiet"
-        daily_cmd = f"{python_bin} {script} run-daily-summary --quiet" if cfg["active"] else None
+        main_cmd = f"{python_bin} {script} run-once --openclaw-output"
+        daily_cmd = f"{python_bin} {script} run-daily-summary --openclaw-output" if cfg["active"] else None
         daily_cron = None
         if cfg["active"]:
             hh, mm = cfg["daily_summary_time"].split(":")
             daily_cron = f"{int(mm)} {int(hh)} * * *"
         spec = openclaw_weixin.openclaw_cron_spec(
             cfg,
+            task_name=resolved_name,
             command=main_cmd,
             schedule_cron=str(SCHEDULE_PRESETS[cfg["schedule"]]["cron"]),
             daily_command=daily_cmd,
             daily_cron=daily_cron,
         )
+        install_result = _install_openclaw_cron_jobs(spec["jobs"])
         return {
             "status": "ok",
             "message": (
-                "微信渠道使用 OpenClaw cron/announce 投递；已生成调度规格，"
-                "请由 Arkclaw/OpenClaw 平台安装该规格。"
+                "微信渠道使用 OpenClaw cron/announce 投递；已通过本机 openclaw CLI 安装调度任务。"
+                if install_result.get("installed")
+                else "微信渠道使用 OpenClaw cron/announce 投递；已生成符合 OpenClaw cron add 的调度规格。"
             ),
             "task_name": resolved_name,
             "schedule": cfg["schedule"],
             "schedule_label": schedule_label(cfg["schedule"]),
             "available_schedules": schedule_options_list(),
             "lookback_minutes": schedule_lookback_minutes(cfg["schedule"]),
-            **spec,
+            "openclaw_cli": install_result,
+            **openclaw_weixin.redact_cron_spec(spec),
         }
 
     return install_unix_cron(resolved_name, cfg["schedule"], cfg["active"], cfg["daily_summary_time"])
@@ -1680,7 +1756,10 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 
 def cmd_run_once(args: argparse.Namespace) -> int:
-    result = run_once(force=args.force, dry_run=args.dry_run)
+    result = run_once(force=args.force, dry_run=args.dry_run, openclaw_output=args.openclaw_output)
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     if not args.quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1694,13 +1773,20 @@ def cmd_manual_push(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         no_feishu=args.no_feishu,
         no_delivery=args.no_delivery,
+        openclaw_output=args.openclaw_output,
     )
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_run_daily(args: argparse.Namespace) -> int:
-    result = run_daily(force=args.force, dry_run=args.dry_run)
+    result = run_daily(force=args.force, dry_run=args.dry_run, openclaw_output=args.openclaw_output)
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     if not args.quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1853,6 +1939,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_once_parser.add_argument("--force", action="store_true")
     run_once_parser.add_argument("--dry-run", action="store_true")
     run_once_parser.add_argument("--quiet", action="store_true")
+    run_once_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     run_once_parser.set_defaults(func=cmd_run_once)
 
     manual_parser = sub.add_parser(
@@ -1865,12 +1952,14 @@ def build_parser() -> argparse.ArgumentParser:
     manual_parser.add_argument("--dry-run", action="store_true")
     manual_parser.add_argument("--no-delivery", action="store_true", help="只查询和记录历史，不投递到任何消息渠道")
     manual_parser.add_argument("--no-feishu", action="store_true")
+    manual_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     manual_parser.set_defaults(func=cmd_manual_push)
 
     run_daily_parser = sub.add_parser("run-daily-summary", help="执行一次每日统计")
     run_daily_parser.add_argument("--force", action="store_true")
     run_daily_parser.add_argument("--dry-run", action="store_true")
     run_daily_parser.add_argument("--quiet", action="store_true")
+    run_daily_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     run_daily_parser.set_defaults(func=cmd_run_daily)
 
     key_parser = sub.add_parser("set-api-key", help="保存 deepseekdata API key 到运行时配置")
