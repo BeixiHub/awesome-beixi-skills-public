@@ -5,34 +5,35 @@ import json
 import os
 import re
 import signal
+import shutil
 import shlex
 import subprocess
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
-from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Any, Callable
 
 import event_query as _event_query
-from event_query import daily_event_summary_many, search_events
+from event_query import daily_event_summary_many, list_events, search_events
 from runtime_config import (
-    load_openclaw_feishu_config,
     resolve_event_api_key,
-    split_env_values,
 )
 
 BJT = timezone(timedelta(hours=8))
+DATE_FMT = "%Y-%m-%d %H:%M:%S"
 ISO_FMT = "%Y-%m-%dT%H:%M:%S+08:00"
 SCRIPT_DIR = Path(__file__).resolve().parent
 STATE_DIR = SCRIPT_DIR / "state"
 PUSH_CONFIG_PATH = STATE_DIR / "push_config.json"
 HISTORY_PATH = STATE_DIR / "push_history.json"
 DEFAULT_TASK_NAME = "OpenClaw-Event-Intelligence-Push"
-VALID_FEISHU_RECEIVE_ID_TYPES = {"chat_id", "open_id", "user_id", "union_id", "email"}
+OPENCLAW_NO_REPLY = "NO_REPLY"
+StreamSink = Callable[[str], None]
 MAX_KEYWORDS = 3
+FILTER_OBSERVABILITY_OPTIONS = {"off", "metrics", "debug"}
 SIGNAL_LEVEL_PRIORITY = {"S级": 0, "A级": 1, "B级": 2, "C级": 3}
 DEFAULT_SCHEDULE = "5m"
 LEGACY_INTERVAL_SCHEDULE_MAP = {
@@ -69,10 +70,6 @@ def schedule_hint_message(prefix: str, schedule: str) -> str:
     return f"{prefix}当前定时推送时间：{schedule_label(schedule)}。如需调整，可选：{schedule_options_text()}。"
 
 
-def feishu_receive_id_type_options_text() -> str:
-    return "、".join(sorted(VALID_FEISHU_RECEIVE_ID_TYPES))
-
-
 def keyword_limit_message(count: int | None = None) -> str:
     prefix = f"当前提供了 {count} 个关键词。" if count is not None else ""
     return f"{prefix}暂不支持超过 {MAX_KEYWORDS} 个关键词；请最多保留 {MAX_KEYWORDS} 个主题。"
@@ -106,10 +103,8 @@ def split_keywords(value: Any) -> list[str]:
     return keywords
 
 
-def validate_keywords(value: Any) -> list[str]:
+def validate_keywords(value: Any, *, default_to_ai: bool = False) -> list[str]:
     keywords = split_keywords(value)
-    if not keywords:
-        keywords = ["AI"]
     if len(keywords) > MAX_KEYWORDS:
         raise RuntimeError(keyword_limit_message(len(keywords)))
     return keywords
@@ -117,6 +112,78 @@ def validate_keywords(value: Any) -> list[str]:
 
 def keywords_label(keywords: list[str]) -> str:
     return " / ".join(keywords)
+
+
+CHINESE_NUMERAL_MAP = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+def chinese_numeral_to_int(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text in CHINESE_NUMERAL_MAP:
+        return CHINESE_NUMERAL_MAP[text]
+    if "十" not in text:
+        return None
+    left, _, right = text.partition("十")
+    tens = CHINESE_NUMERAL_MAP.get(left, 1) if left else 1
+    ones = CHINESE_NUMERAL_MAP.get(right, 0) if right else 0
+    result = tens * 10 + ones
+    return result if result > 0 else None
+
+
+def parse_event_ref(query: str) -> dict[str, Any]:
+    """Parse user phrases such as "第3条详细看看" or "我要看第三个深度报告"."""
+    text = str(query or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    batch_offset = 1 if re.search(r"上一轮|上一次|上轮|前一轮", compact) else 0
+
+    index: int | None = None
+    index_patterns = (
+        r"第(?P<num>\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)?",
+        r"(?P<num>\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)(?:.*?)(?:详细|详情|深度|看看|看一下)",
+    )
+    for pattern in index_patterns:
+        match = re.search(pattern, compact)
+        if not match:
+            continue
+        index = chinese_numeral_to_int(match.group("num"))
+        if index is not None:
+            break
+
+    title_keyword = compact
+    title_keyword = re.sub(r"上一轮|上一次|上轮|前一轮|刚才|刚刚|本轮|这轮|推送|事件", "", title_keyword)
+    title_keyword = re.sub(r"第(?:\d+|[零〇一二两三四五六七八九十]+)(?:条|个|则|篇)?", "", title_keyword)
+    title_keyword = re.sub(r"\d+(?:条|个|则|篇)", "", title_keyword)
+    title_keyword = re.sub(
+        r"详细看看|详细看一下|详细|详情|深度报告|深度分析|报告|看看|看一下|我要看|我想看|关于|那条|那个|这个",
+        "",
+        title_keyword,
+    ).strip(" ，,。.!！?？：:；;、")
+    if len(title_keyword) < 2:
+        title_keyword = ""
+
+    return {
+        "raw": text,
+        "batch_offset": batch_offset,
+        "index": index,
+        "title_keyword": title_keyword,
+    }
 
 
 def now_bjt() -> datetime:
@@ -189,6 +256,7 @@ def save_history(history: dict[str, Any]) -> None:
 
 def persist_last_error(detail: str) -> None:
     try:
+        detail = redact_sensitive_text(detail)
         raw_cfg = load_json(PUSH_CONFIG_PATH, default={})
         retention_days = 5
         if isinstance(raw_cfg, dict):
@@ -221,6 +289,20 @@ def normalize_legacy_interval_schedule(value: Any) -> str | None:
     return LEGACY_INTERVAL_SCHEDULE_MAP.get(minutes)
 
 
+def normalize_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"1", "true", "yes", "on", "enable", "enabled"}:
+            return True
+        if cleaned in {"0", "false", "no", "off", "disable", "disabled"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def validate_schedule(value: Any) -> str:
     schedule = str(value or "").strip()
     if schedule in SCHEDULE_PRESETS:
@@ -251,18 +333,21 @@ def schedule_sleep_seconds(schedule: str) -> int:
 def default_runtime_config() -> dict[str, Any]:
     return {
         "active": False,
-        "keywords": ["AI"],
+        "keywords": [],
+        "event_source": "",
+        "event_type": "",
+        "is_high_value": "",
         "schedule": DEFAULT_SCHEDULE,
         "page_size": 10,
         "retention_days": 5,
         "daily_summary_time": "09:00",
         "task_name": DEFAULT_TASK_NAME,
-        "feishu_webhooks": [],
-        "feishu_receive_id": "",
-        "feishu_receive_id_type": "chat_id",
         "event_intel_api_key": "",
         "history_file": "state/push_history.json",
         "last_push_time": "",
+        "min_verification_comprehensive_score": 0.0,
+        "min_semantic_score": 0.35,
+        "filter_observability": "off",
     }
 
 
@@ -297,6 +382,10 @@ def normalize_runtime_config(raw: Any) -> dict[str, Any]:
     keywords = validate_keywords(cfg.get("keywords"))
     cfg["keywords"] = keywords
 
+    cfg["event_source"] = str(cfg.get("event_source", "") or "").strip()
+    cfg["event_type"] = str(cfg.get("event_type", "") or "").strip()
+    cfg["is_high_value"] = str(cfg.get("is_high_value", "") or "").strip()
+
     task_name = str(cfg.get("task_name", DEFAULT_TASK_NAME) or DEFAULT_TASK_NAME).strip()
     cfg["task_name"] = task_name or DEFAULT_TASK_NAME
 
@@ -309,31 +398,28 @@ def normalize_runtime_config(raw: Any) -> dict[str, Any]:
     history_file = str(cfg.get("history_file", "state/push_history.json") or "").strip()
     cfg["history_file"] = history_file or "state/push_history.json"
 
+    def normalize_optional_score(key: str, default: float | None) -> float | None:
+        value = cfg.get(key, default)
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    cfg["min_verification_comprehensive_score"] = normalize_optional_score(
+        "min_verification_comprehensive_score",
+        0.0,
+    )
+    cfg["min_semantic_score"] = normalize_optional_score("min_semantic_score", 0.35)
+    observability = str(cfg.get("filter_observability", "off") or "off").strip().lower()
+    if observability not in FILTER_OBSERVABILITY_OPTIONS:
+        observability = "off"
+    cfg["filter_observability"] = observability
     daily_time = str(cfg.get("daily_summary_time", "09:00") or "09:00").strip()
     if not _is_hhmm(daily_time):
         daily_time = "09:00"
     cfg["daily_summary_time"] = daily_time
-
-    webhooks = cfg.get("feishu_webhooks", [])
-    if isinstance(webhooks, str):
-        webhooks = [webhooks]
-    if not isinstance(webhooks, list):
-        webhooks = []
-    cfg["feishu_webhooks"] = [
-        str(item).strip()
-        for item in webhooks
-        if isinstance(item, str) and str(item).strip()
-    ]
-
-    receive_id = str(cfg.get("feishu_receive_id", "") or "").strip()
-    cfg["feishu_receive_id"] = receive_id
-
-    receive_id_type = str(cfg.get("feishu_receive_id_type", "chat_id") or "chat_id").strip()
-    if receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
-        receive_id_type = ""
-    if not receive_id and not receive_id_type:
-        receive_id_type = "chat_id"
-    cfg["feishu_receive_id_type"] = receive_id_type
     return cfg
 
 
@@ -353,11 +439,20 @@ def apply_runtime_event_api_key(cfg: dict[str, Any], *, reset_client: bool = Fal
         reset()
 
 
+def apply_runtime_filter_observability(cfg: dict[str, Any]) -> None:
+    mode = str(cfg.get("filter_observability", "off") or "off").strip().lower()
+    if mode not in FILTER_OBSERVABILITY_OPTIONS:
+        mode = "off"
+    env_name = getattr(_event_query, "FILTER_OBSERVABILITY_ENV", "EVENT_INTEL_FILTER_OBSERVABILITY")
+    os.environ[env_name] = mode
+
+
 def load_and_persist_runtime_config() -> dict[str, Any]:
     """Load config, apply schema/default normalization, then write it back."""
     cfg = load_runtime_config()
     save_json(PUSH_CONFIG_PATH, cfg)
     apply_runtime_event_api_key(cfg, reset_client=True)
+    apply_runtime_filter_observability(cfg)
     return cfg
 
 
@@ -452,15 +547,26 @@ def compact_event(item: dict[str, Any]) -> dict[str, Any]:
         matched_keywords.append(source_keyword)
     if not event_id and title:
         event_id = f"noid::{title}::{publish}"
-    return {
+    compacted = {
         "eventId": event_id,
         "compliantTitle": title,
+        "eventTitle": item.get("eventTitle", ""),
+        "eventType": item.get("eventType", ""),
+        "eventSource": item.get("eventSource", ""),
+        "isHighValue": item.get("isHighValue", ""),
         "eventPublishDate": publish,
         "signalLevel": level,
         "original_summary": original_summary,
         "summary": summary,
         "matched_keywords": matched_keywords,
     }
+    for score_key in ("verificationComprehensiveScore", "semanticScore"):
+        if score_key in item:
+            compacted[score_key] = item.get(score_key)
+    for rule_key in ("ruleFilterPassed", "ruleFilterReason", "matchedIncludeTerms", "matchedExcludeTerms"):
+        if rule_key in item:
+            compacted[rule_key] = item.get(rule_key)
+    return compacted
 
 
 def event_sort_key(event: dict[str, Any]) -> tuple[int, str]:
@@ -507,15 +613,30 @@ def search_events_for_keywords(
     *,
     minutes: int,
     page_size: int,
+    min_verification_comprehensive_score: float | None = 0.0,
+    min_semantic_score: float | None = 0.35,
 ) -> dict[str, Any]:
     keyword_results: list[dict[str, Any]] = []
     if len(keywords) == 1:
-        result = search_events(keyword=keywords[0], minutes=minutes, page_size=page_size)
+        result = search_events(
+            keyword=keywords[0],
+            minutes=minutes,
+            page_size=page_size,
+            min_verification_comprehensive_score=min_verification_comprehensive_score,
+            min_semantic_score=min_semantic_score,
+        )
         keyword_results.append({"keyword": keywords[0], **result})
     else:
         with ThreadPoolExecutor(max_workers=len(keywords)) as executor:
             futures = {
-                executor.submit(search_events, keyword=keyword, minutes=minutes, page_size=page_size): keyword
+                executor.submit(
+                    search_events,
+                    keyword=keyword,
+                    minutes=minutes,
+                    page_size=page_size,
+                    min_verification_comprehensive_score=min_verification_comprehensive_score,
+                    min_semantic_score=min_semantic_score,
+                ): keyword
                 for keyword in keywords
             }
             for future in as_completed(futures):
@@ -534,10 +655,306 @@ def search_events_for_keywords(
     }
 
 
+def parse_bjt_datetime(value: str, *, field_name: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise RuntimeError(f"{field_name} 不能为空，格式为 YYYY-MM-DD HH:MM:SS。")
+    normalized = text.replace("T", " ")
+    if len(normalized) == 10:
+        normalized = f"{normalized} 00:00:00"
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    except ValueError as exc:
+        raise RuntimeError(f"{field_name} 格式不正确，请使用 YYYY-MM-DD HH:MM:SS。") from exc
+    return parsed.replace(tzinfo=BJT)
+
+
+def parse_optional_bool(value: Any) -> bool | str | None:
+    if value is None:
+        return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "y", "on", "是", "高价值"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off", "否", "非高价值"}:
+        return False
+    return text
+
+
+def compact_structured_event(item: dict[str, Any]) -> dict[str, Any]:
+    event = compact_event(item)
+    for key in ("eventTitle", "eventType", "eventSource", "isHighValue"):
+        if key in item:
+            event[key] = item.get(key)
+    for keyword_key in (
+        "matched_keywords",
+        "semanticScore",
+        "ruleFilterPassed",
+        "ruleFilterReason",
+        "matchedIncludeTerms",
+        "matchedExcludeTerms",
+    ):
+        event.pop(keyword_key, None)
+    return event
+
+
+def query_events_unified(
+    *,
+    keywords: list[str],
+    minutes: int,
+    page_size: int,
+    cfg: dict[str, Any],
+    event_source: str = "",
+    event_type: str = "",
+    is_high_value: Any = None,
+    start_dt: datetime | None = None,
+    end_dt: datetime | None = None,
+    max_events: int | None = None,
+) -> dict[str, Any]:
+    cleaned_keywords = validate_keywords(keywords, default_to_ai=False)
+    resolved_page_size = max(1, int(page_size or 10))
+
+    if cleaned_keywords:
+        result = search_events_for_keywords(
+            keywords=cleaned_keywords,
+            minutes=minutes,
+            page_size=resolved_page_size,
+            min_verification_comprehensive_score=cfg.get("min_verification_comprehensive_score"),
+            min_semantic_score=cfg.get("min_semantic_score"),
+        )
+        raw_events = result.get("events", [])
+        return {
+            "mode": "keyword",
+            "source": "semantic_event_list",
+            "keywords": cleaned_keywords,
+            "keyword_label": keywords_label(cleaned_keywords),
+            "total": int(result.get("total", 0) or 0),
+            "sum_keyword_total": int(result.get("sum_keyword_total", 0) or 0),
+            "totals_by_keyword": result.get("totals_by_keyword", {}),
+            "events": [compact_event(item) for item in raw_events if isinstance(item, dict)],
+        }
+
+    end_dt = end_dt or now_bjt()
+    start_dt = start_dt or (end_dt - timedelta(minutes=max(1, int(minutes or 60))))
+    result = list_events(
+        event_publish_date_start=start_dt,
+        event_publish_date_end=end_dt,
+        event_source=event_source or None,
+        event_type=event_type or None,
+        is_high_value=parse_optional_bool(is_high_value),
+        page_size=100,
+        max_events=max_events,
+    )
+    raw_events = result.get("events", [])
+    return {
+        "mode": "structured",
+        "source": "reportserver_event_analysis_list",
+        "keywords": [],
+        "keyword_label": "无关键词",
+        "total": int(result.get("total", 0) or 0),
+        "sum_keyword_total": int(result.get("total", 0) or 0),
+        "totals_by_keyword": {},
+        "deduped_total": int(result.get("deduped_total", 0) or 0),
+        "fetched": int(result.get("fetched", 0) or 0),
+        "query": result.get("query", {}),
+        "events": [
+            compact_structured_event(item)
+            for item in raw_events
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def build_structured_list_text(
+    *,
+    events: list[dict[str, Any]],
+    total: int,
+    fetched: int,
+    start: str,
+    end: str,
+    event_source: str = "",
+    event_type: str = "",
+    is_high_value: Any = None,
+    max_items: int | None = None,
+) -> str:
+    stamp = now_bjt().strftime("%H:%M")
+    filters = []
+    if event_source:
+        filters.append(f"来源「{event_source}」")
+    if event_type:
+        filters.append(f"类型「{event_type}」")
+    if is_high_value is not None and is_high_value != "":
+        filters.append(f"高价值={is_high_value}")
+    filter_text = "，".join(filters) if filters else "无额外筛选"
+    display_limit = max_items if max_items else min(len(events), 30)
+    shown = events[:display_limit]
+    lines = [
+        f"📡 事件列表 ({stamp})",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 时间范围: {start} ~ {end}",
+        f"🔎 条件: {filter_text}",
+        f"📋 命中 {total} 条，已拉取 {fetched} 条，本次展示 {len(shown)} 条",
+        "",
+    ]
+    for idx, ev in enumerate(shown, start=1):
+        title = ev.get("compliantTitle") or ev.get("eventTitle") or "（无标题）"
+        source = ev.get("eventSource") or "-"
+        event_type_text = ev.get("eventType") or "-"
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"[{idx}] {title}")
+        lines.append(
+            f"    ⏰ {ev.get('eventPublishDate') or '-'} ｜ 来源: {source} ｜ 类型: {event_type_text}"
+        )
+        lines.append(f"    📌 一句话总结: {clip(ev.get('original_summary') or ev.get('summary') or '无', 160)}")
+        lines.append("")
+    if len(events) > len(shown):
+        lines.append(f"其余 {len(events) - len(shown)} 条已拉取并记录，可继续按序号查看详情。")
+        lines.append("")
+    lines.append("如需详情，可直接说「第X条详细看看」。")
+    return "\n".join(lines).strip()
+
+
+def structured_event_list(
+    *,
+    start: str = "",
+    end: str = "",
+    minutes: int = 0,
+    event_source: str = "",
+    event_type: str = "",
+    is_high_value: Any = None,
+    page_size: int = 100,
+    limit: int = 0,
+    no_delivery: bool = False,
+    openclaw_output: bool = False,
+    stream_sink: StreamSink | None = None,
+) -> dict[str, Any]:
+    cfg = load_runtime_config()
+    apply_runtime_event_api_key(cfg, reset_client=True)
+    retention_days = cfg["retention_days"]
+    history = load_history(retention_days=retention_days)
+    prune_history(history, retention_days=retention_days)
+
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
+
+    if start or end:
+        if not start or not end:
+            raise RuntimeError("按固定时间窗拉取时必须同时提供 start 和 end。")
+        start_dt = parse_bjt_datetime(start, field_name="start")
+        end_dt = parse_bjt_datetime(end, field_name="end")
+    else:
+        resolved_minutes = max(1, int(minutes or 60))
+        end_dt = now_bjt()
+        start_dt = end_dt - timedelta(minutes=resolved_minutes)
+    if end_dt < start_dt:
+        raise RuntimeError("end 不能早于 start。")
+
+    max_events = int(limit) if int(limit or 0) > 0 else None
+    _emit_stream(
+        stream_sink,
+        (
+            "Event Intelligence: querying ReportServer structured event list, "
+            f"window={start_dt.strftime(DATE_FMT)}~{end_dt.strftime(DATE_FMT)}."
+        ),
+    )
+    result = query_events_unified(
+        keywords=[],
+        minutes=max(1, int(minutes or 60)),
+        page_size=page_size,
+        cfg=cfg,
+        event_source=event_source,
+        event_type=event_type,
+        is_high_value=is_high_value,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        max_events=max_events,
+    )
+    _emit_stream(
+        stream_sink,
+        f"Event Intelligence: structured query finished, total={result.get('total', 0)}, fetched={result.get('fetched', 0)}.",
+    )
+
+    compacted = [item for item in result.get("events", []) if isinstance(item, dict)]
+    run_time = to_iso(now_bjt())
+    history["last_run_time"] = run_time
+    history["last_error"] = ""
+
+    if not compacted:
+        save_history(history)
+        return {
+            "status": "ok",
+            "source": "reportserver_event_analysis_list",
+            "total": int(result.get("total", 0) or 0),
+            "fetched": int(result.get("fetched", 0) or 0),
+            "deduped_total": int(result.get("deduped_total", 0) or 0),
+            "pushed": 0,
+            "reason": "no_events",
+            "message": "没有查询到符合条件的事件。",
+            "query": result.get("query", {}),
+            "run_time": run_time,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
+            "events": [],
+        }
+
+    text = build_push_text(
+        keyword=result.get("keyword_label") or "无关键词",
+        minutes=max(1, int(minutes or 60)),
+        events=compacted,
+        total=int(result.get("total", 0) or 0),
+        title="事件列表",
+        max_items=max_events,
+        display_limit=max_events or 30,
+        totals_by_keyword=result.get("totals_by_keyword", {}),
+    )
+    indexed_events, batch_time = record_history_batch(
+        history,
+        keywords=[],
+        events=compacted,
+        source="reportserver_event_analysis_list_no_delivery" if no_delivery else "reportserver_event_analysis_list",
+        retention_days=retention_days,
+        update_sent_index=not no_delivery,
+        update_last_push_time=not no_delivery,
+    )
+    save_history(history)
+    return {
+        "status": "ok",
+        "message": f"事件列表查询完成，已处理 {len(indexed_events)} 条事件。",
+        "source": "reportserver_event_analysis_list",
+        "total": int(result.get("total", 0) or 0),
+        "fetched": int(result.get("fetched", 0) or 0),
+        "deduped_total": int(result.get("deduped_total", 0) or 0),
+        "pushed": len(indexed_events),
+        "query": result.get("query", {}),
+        "run_time": run_time,
+        "last_push_time": batch_time if not no_delivery else "",
+        "openclaw_announce_text": text if openclaw_output else "",
+        "text": text,
+        "events": indexed_events,
+    }
+
+
 def clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)] + "…"
+
+
+def redact_sensitive_text(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    patterns = (
+        r"sk-[A-Za-z0-9._-]{6,}",
+        r"(?:EVENT_INTEL_API_KEY|DEEPSEEKDATA_API_KEY)\s*=\s*['\"]?[^'\"\s,;]+",
+        r"(?i)(event_intel_api_key|deepseekdata_api_key|api_key|apiKey)\s*[:=]\s*['\"]?[^'\"\s,;}]+",
+        r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[A-Za-z0-9._-]+",
+    )
+    redacted = text
+    for pattern in patterns:
+        redacted = re.sub(pattern, "<redacted>", redacted)
+    return redacted
 
 
 def build_push_text(
@@ -548,10 +965,12 @@ def build_push_text(
     total: int,
     title: str = "事件推送",
     max_items: int | None = None,
+    display_limit: int | None = None,
     totals_by_keyword: dict[str, int] | None = None,
 ) -> str:
     stamp = now_bjt().strftime("%H:%M")
-    limit = max_items or len(events)
+    limit = max_items or display_limit or len(events)
+    shown_events = events[:display_limit] if display_limit else events
     raw_total = sum(totals_by_keyword.values()) if totals_by_keyword else total
     lines = [
         (
@@ -564,7 +983,7 @@ def build_push_text(
         totals_text = "；".join(f"{name} {count} 条" for name, count in totals_by_keyword.items())
         lines.append(f"分主题原始命中：{totals_text}")
         lines.append("")
-    for idx, ev in enumerate(events, start=1):
+    for idx, ev in enumerate(shown_events, start=1):
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"[{idx}] {ev.get('compliantTitle') or '（无标题）'}")
         matched = ev.get("matched_keywords")
@@ -575,13 +994,18 @@ def build_push_text(
         lines.append(
             f"    ⏰ {ev.get('eventPublishDate') or '-'} ｜ 信号等级: {ev.get('signalLevel') or '-'}"
         )
-        lines.append(f"    📌 一句话总结: {clip(ev.get('original_summary') or '无', 200)}")
-        lines.append(f"    📝 事件摘要: {clip(ev.get('summary') or '无', 500)}")
+        source = str(ev.get("eventSource", "") or "").strip()
+        event_type = str(ev.get("eventType", "") or "").strip()
+        if source or event_type:
+            lines.append(f"    来源: {source or '-'} ｜ 类型: {event_type or '-'}")
+        lines.append(f"    📌 一句话总结: {clip(ev.get('original_summary') or '无', 120)}")
+        lines.append(f"    📝 事件摘要: {clip(ev.get('summary') or '无', 180)}")
         lines.append("")
-    lines.append("💡 对某条感兴趣？直接说「第X条详细看看」或描述标题关键词即可查看完整分析。")
-    lines.append("🔄 想换个主题？说「关注半导体」即可切换关键词。")
-    lines.append(f"⏱️ 想调整推送时间？可选：{schedule_options_text()}。")
-    return "\n".join(lines)
+    if len(events) > len(shown_events):
+        lines.append(f"其余 {len(events) - len(shown_events)} 条已拉取并记录，可继续按序号查看详情。")
+        lines.append("")
+    lines.append("如需详情，可直接说「第X条详细看看」。")
+    return "\n".join(lines).strip()
 
 
 def build_daily_summary_text(keyword_label: str, result: dict[str, Any]) -> str:
@@ -623,125 +1047,41 @@ def build_daily_summary_text(keyword_label: str, result: dict[str, Any]) -> str:
             f"🟠 A 级事件: {a_count} 条",
             f"📋 其他等级: {other_count} 条",
             f"── 合计: {total} 条",
-            "",
-            "💡 想查看具体事件？说「查最近24小时的事件」。",
         ]
     )
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
-def post_to_feishu(webhook: str, text: str) -> dict[str, Any]:
-    payload = {"msg_type": "text", "content": {"text": text}}
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = Request(
-        webhook,
-        data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
+def structured_daily_summary(cfg: dict[str, Any], minutes: int = 1440) -> dict[str, Any]:
+    end_dt = now_bjt()
+    start_dt = end_dt - timedelta(minutes=minutes)
+    result = query_events_unified(
+        keywords=[],
+        minutes=minutes,
+        page_size=100,
+        cfg=cfg,
+        event_source=cfg.get("event_source", ""),
+        event_type=cfg.get("event_type", ""),
+        is_high_value=cfg.get("is_high_value", ""),
+        start_dt=start_dt,
+        end_dt=end_dt,
+        max_events=None,
     )
-    try:
-        with urlopen(req, timeout=30) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        detail = exc.read(2048).decode("utf-8", errors="replace") if exc.fp else ""
-        raise RuntimeError(f"飞书 Webhook HTTP 错误 {exc.code}：{detail or exc.reason}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"飞书 Webhook 请求失败：{exc.reason}") from exc
-
-    try:
-        parsed = json.loads(data)
-    except json.JSONDecodeError:
-        parsed = {"raw": data}
-
-    status_code = parsed.get("StatusCode")
-    code = parsed.get("code")
-    if status_code not in (None, 0) or code not in (None, 0):
-        raise RuntimeError(f"飞书 Webhook 拒绝了本次消息：{parsed}")
-    return parsed
-
-
-def resolve_webhooks(cfg: dict[str, Any]) -> list[str]:
-    webhooks = cfg.get("feishu_webhooks", [])
-    if not isinstance(webhooks, list):
-        webhooks = []
-    env_webhooks = (
-        split_env_values(os.getenv("FEISHU_WEBHOOKS"))
-        + split_env_values(os.getenv("FEISHU_WEBHOOK_URL"))
-        + split_env_values(os.getenv("FEISHU_WEBHOOK"))
-    )
-    openclaw_webhooks = load_openclaw_feishu_config().get("webhooks", [])
-    if not isinstance(openclaw_webhooks, list):
-        openclaw_webhooks = []
-    candidates = [*webhooks, *env_webhooks, *openclaw_webhooks]
-    cleaned: list[str] = []
-    for item in candidates:
-        if not isinstance(item, str):
-            continue
-        url = item.strip()
-        if not url:
-            continue
-        if not url.startswith("https://"):
-            continue
-        if "replace-with-your-webhook" in url:
-            continue
-        if url not in cleaned:
-            cleaned.append(url)
-    return cleaned
-
-
-def resolve_feishu_app_config(cfg: dict[str, Any] | None = None) -> dict[str, str]:
-    openclaw_cfg = load_openclaw_feishu_config()
-    runtime_cfg = cfg if isinstance(cfg, dict) else {}
-    runtime_receive_id = str(runtime_cfg.get("feishu_receive_id", "") or "").strip()
-    runtime_receive_id_type = (
-        str(runtime_cfg.get("feishu_receive_id_type", "") or "").strip() if runtime_receive_id else ""
-    )
-    app_id = os.getenv("FEISHU_APP_ID", "").strip() or str(openclaw_cfg.get("app_id", "") or "").strip()
-    app_secret = os.getenv("FEISHU_APP_SECRET", "").strip() or str(
-        openclaw_cfg.get("app_secret", "") or ""
-    ).strip()
-    receive_id = os.getenv("FEISHU_RECEIVE_ID", "").strip() or str(
-        runtime_receive_id or openclaw_cfg.get("receive_id", "") or ""
-    ).strip()
-    receive_id_type = (
-        os.getenv("FEISHU_RECEIVE_ID_TYPE", "").strip()
-        or runtime_receive_id_type
-        or str(openclaw_cfg.get("receive_id_type", "") or "").strip()
-        or "chat_id"
-    )
-    if receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
-        receive_id_type = ""
+    levels = [str(item.get("signalLevel", "") or "") for item in result.get("events", [])]
+    total = len(levels)
+    s_count = sum(1 for level in levels if level == "S级")
+    a_count = sum(1 for level in levels if level == "A级")
     return {
-        "app_id": app_id,
-        "app_secret": app_secret,
-        "receive_id": receive_id,
-        "receive_id_type": receive_id_type,
-        "config_path": str(openclaw_cfg.get("config_path", "") or ""),
-    }
-
-
-def resolve_feishu_app_target(cfg: dict[str, Any] | None = None) -> dict[str, str] | None:
-    target = resolve_feishu_app_config(cfg)
-    if (
-        not target.get("app_id")
-        or not target.get("app_secret")
-        or not target.get("receive_id")
-        or target.get("receive_id_type") not in VALID_FEISHU_RECEIVE_ID_TYPES
-    ):
-        return None
-    return target
-
-
-def feishu_config_diagnostic(cfg: dict[str, Any]) -> dict[str, Any]:
-    app_cfg = resolve_feishu_app_config(cfg)
-    return {
-        "webhook_count": len(resolve_webhooks(cfg)),
-        "has_app_id": bool(app_cfg["app_id"]),
-        "has_app_secret": bool(app_cfg["app_secret"]),
-        "has_receive_id": bool(app_cfg["receive_id"]),
-        "receive_id_type": app_cfg["receive_id_type"] if app_cfg["receive_id"] else "",
-        "receive_id_configured_in_runtime": bool(str(cfg.get("feishu_receive_id", "") or "").strip()),
-        "openclaw_config_path": app_cfg.get("config_path", ""),
+        "window_minutes": minutes,
+        "keywords": [],
+        "total": total,
+        "S级": s_count,
+        "A级": a_count,
+        "other": total - s_count - a_count,
+        "start": start_dt.strftime(DATE_FMT),
+        "end": end_dt.strftime(DATE_FMT),
+        "source": result.get("source", ""),
+        "query": result.get("query", {}),
     }
 
 
@@ -751,8 +1091,7 @@ def has_event_api_key(cfg: dict[str, Any]) -> bool:
 
 def event_api_key_missing_message() -> str:
     return (
-        "缺少 deepseekdata API key。请先让用户提供 key，然后配置到 OpenClaw；"
-        "如果是本地部署，也可以通过 stdin 或 --key-file 保存到运行时配置。"
+        "deepseekdata API 凭据未配置。请先配置凭据后再执行查询。"
     )
 
 
@@ -766,8 +1105,7 @@ def set_event_api_key(api_key: str) -> dict[str, Any]:
     apply_runtime_event_api_key(cfg, reset_client=True)
     return {
         "status": "ok",
-        "message": "已保存 deepseekdata API key。",
-        "path": str(PUSH_CONFIG_PATH),
+        "message": "deepseekdata API 凭据已配置。",
         "event_api_has_key": True,
     }
 
@@ -777,22 +1115,32 @@ def read_secret_file(path_value: str) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
-        raise RuntimeError(f"读取密钥文件失败：{path}。请确认文件存在且当前用户有读取权限。") from exc
+        raise RuntimeError("读取密钥文件失败。请确认文件存在且当前用户有读取权限。") from exc
 
 
 def configure_runtime(
     *,
     active: bool | None = None,
     keywords: str | list[str] | None = None,
+    event_source: str | None = None,
+    event_type: str | None = None,
+    is_high_value: str | None = None,
     schedule: str | None = None,
     page_size: int | None = None,
     daily_summary_time: str | None = None,
+    filter_observability: str | None = None,
 ) -> dict[str, Any]:
     cfg = load_runtime_config()
     if active is not None:
         cfg["active"] = active
     if keywords is not None:
-        cfg["keywords"] = validate_keywords(keywords)
+        cfg["keywords"] = validate_keywords(keywords, default_to_ai=False)
+    if event_source is not None:
+        cfg["event_source"] = event_source
+    if event_type is not None:
+        cfg["event_type"] = event_type
+    if is_high_value is not None:
+        cfg["is_high_value"] = is_high_value
     if schedule is not None:
         cfg["schedule"] = validate_schedule(schedule)
     if page_size is not None:
@@ -801,208 +1149,28 @@ def configure_runtime(
         cleaned_time = daily_summary_time.strip()
         if cleaned_time:
             cfg["daily_summary_time"] = cleaned_time
+    if filter_observability is not None:
+        cfg["filter_observability"] = filter_observability
 
     cfg = normalize_runtime_config(cfg)
     save_json(PUSH_CONFIG_PATH, cfg)
     return {
         "status": "ok",
         "message": schedule_hint_message("已保存运行时推送配置。", cfg["schedule"]),
-        "path": str(PUSH_CONFIG_PATH),
         "active": cfg["active"],
         "keywords": cfg["keywords"],
+        "event_source": cfg.get("event_source", ""),
+        "event_type": cfg.get("event_type", ""),
+        "is_high_value": cfg.get("is_high_value", ""),
         "schedule": cfg["schedule"],
         "schedule_label": schedule_label(cfg["schedule"]),
         "available_schedules": schedule_options_list(),
         "lookback_minutes": schedule_lookback_minutes(cfg["schedule"]),
         "page_size": cfg["page_size"],
         "daily_summary_time": cfg["daily_summary_time"],
+        "filter_observability": cfg["filter_observability"],
     }
 
-
-def set_feishu_target(receive_id: str, receive_id_type: str = "chat_id") -> dict[str, Any]:
-    cleaned_receive_id = receive_id.strip()
-    cleaned_receive_id_type = (receive_id_type or "chat_id").strip()
-    if not cleaned_receive_id:
-        raise RuntimeError("飞书 receive_id 不能为空。")
-    if cleaned_receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
-        raise RuntimeError(
-            f"不支持的飞书 receive_id_type：{cleaned_receive_id_type!r}。"
-            f"可选值：{feishu_receive_id_type_options_text()}。"
-        )
-    cfg = load_runtime_config()
-    cfg["feishu_receive_id"] = cleaned_receive_id
-    cfg["feishu_receive_id_type"] = cleaned_receive_id_type
-    save_json(PUSH_CONFIG_PATH, cfg)
-    return {
-        "status": "ok",
-        "message": "已保存飞书接收目标。",
-        "path": str(PUSH_CONFIG_PATH),
-        "receive_id_type": cleaned_receive_id_type,
-        "has_receive_id": True,
-        "has_feishu_target": has_feishu_target(cfg),
-    }
-
-
-def set_feishu_webhook(url: str, *, append: bool = False) -> dict[str, Any]:
-    cleaned = url.strip()
-    if not cleaned:
-        raise RuntimeError("飞书 Webhook URL 不能为空。")
-    if not cleaned.startswith("https://"):
-        raise RuntimeError("飞书 Webhook URL 必须以 https:// 开头。")
-    if "replace-with-your-webhook" in cleaned:
-        raise RuntimeError("飞书 Webhook URL 仍是占位符，请替换为真实地址。")
-    cfg = load_runtime_config()
-    existing = cfg.get("feishu_webhooks", [])
-    if not isinstance(existing, list):
-        existing = []
-    webhooks = [
-        str(item).strip()
-        for item in existing
-        if isinstance(item, str) and str(item).strip()
-    ]
-    if append:
-        if cleaned not in webhooks:
-            webhooks.append(cleaned)
-        cfg["feishu_webhooks"] = webhooks
-    else:
-        cfg["feishu_webhooks"] = [cleaned]
-    save_json(PUSH_CONFIG_PATH, cfg)
-    return {
-        "status": "ok",
-        "message": "已追加飞书 Webhook URL。" if append else "已保存飞书 Webhook URL。",
-        "path": str(PUSH_CONFIG_PATH),
-        "webhook_count": len(resolve_webhooks(cfg)),
-        "has_feishu_target": has_feishu_target(cfg),
-    }
-
-
-def feishu_missing_target_message(cfg: dict[str, Any] | None = None) -> str:
-    app_cfg = resolve_feishu_app_config(cfg)
-    if app_cfg["app_id"] or app_cfg["app_secret"]:
-        missing = []
-        if not app_cfg["app_id"]:
-            missing.append("App ID")
-        if not app_cfg["app_secret"]:
-            missing.append("App Secret")
-        if not app_cfg["receive_id"]:
-            missing.append("receive_id")
-        if app_cfg["receive_id"] and not app_cfg["receive_id_type"]:
-            missing.append("有效的 receive_id_type")
-        return (
-            "飞书自建应用配置不完整，缺少："
-            f"{', '.join(missing)}。"
-            "请提供缺失信息，或提供飞书 Webhook URL。"
-            "如果要推送到群聊，请提供群聊 chat_id/receive_id。"
-        )
-    return (
-        "尚未配置有效的飞书接收目标。请提供飞书 Webhook URL，"
-        "或提供飞书自建应用的 App ID、App Secret 和 receive_id。"
-        "如果要推送到群聊，请提供群聊 chat_id/receive_id。"
-    )
-
-
-def has_feishu_target(cfg: dict[str, Any]) -> bool:
-    return bool(resolve_webhooks(cfg) or resolve_feishu_app_target(cfg))
-
-
-def feishu_api_base() -> str:
-    return os.getenv("FEISHU_API_BASE", "https://open.feishu.cn/open-apis").rstrip("/")
-
-
-def post_json_request(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urlopen(req, timeout=30) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        detail = exc.read(2048).decode("utf-8", errors="replace") if exc.fp else ""
-        raise RuntimeError(f"飞书 API HTTP 错误 {exc.code}：{detail or exc.reason}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"飞书 API 请求失败：{exc.reason}") from exc
-    try:
-        return json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"飞书 API 返回的不是 JSON：{data[:300]}") from exc
-
-
-def fetch_feishu_tenant_access_token(app_id: str, app_secret: str) -> str:
-    parsed = post_json_request(
-        f"{feishu_api_base()}/auth/v3/tenant_access_token/internal",
-        {"app_id": app_id, "app_secret": app_secret},
-        {"Content-Type": "application/json; charset=utf-8"},
-    )
-    if parsed.get("code") != 0:
-        raise RuntimeError(f"飞书 tenant_access_token 获取失败：{parsed}")
-    token = str(parsed.get("tenant_access_token", "") or "")
-    if not token:
-        raise RuntimeError(f"飞书 token 响应缺少 tenant_access_token：{parsed}")
-    return token
-
-
-def post_to_feishu_app(target: dict[str, str], text: str) -> dict[str, Any]:
-    receive_id_type = target.get("receive_id_type", "")
-    if receive_id_type not in VALID_FEISHU_RECEIVE_ID_TYPES:
-        raise RuntimeError(
-            f"不支持的飞书 receive_id_type：{receive_id_type!r}。"
-            f"可选值：{feishu_receive_id_type_options_text()}。"
-        )
-    token = fetch_feishu_tenant_access_token(target["app_id"], target["app_secret"])
-    content = json.dumps({"text": text}, ensure_ascii=False)
-    parsed = post_json_request(
-        f"{feishu_api_base()}/im/v1/messages?receive_id_type={receive_id_type}",
-        {
-            "receive_id": target["receive_id"],
-            "msg_type": "text",
-            "content": content,
-        },
-        {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-    )
-    if parsed.get("code") != 0:
-        raise RuntimeError(f"飞书自建应用拒绝了本次消息：{parsed}")
-    return parsed
-
-
-def post_text_to_feishu(cfg: dict[str, Any], text: str, dry_run: bool = False) -> list[dict[str, Any]]:
-    if dry_run:
-        return [{"method": "dry-run", "message": "试运行未实际发送飞书消息。", "result": {"ok": True}}]
-
-    webhooks = resolve_webhooks(cfg)
-    if webhooks:
-        results: list[dict[str, Any]] = []
-        for url in webhooks:
-            try:
-                result = post_to_feishu(url, text)
-            except Exception as exc:  # noqa: BLE001
-                results.append({"method": "webhook", "webhook": url, "ok": False, "error": str(exc)})
-            else:
-                results.append({"method": "webhook", "message": "飞书 Webhook 推送成功。", "webhook": url, "ok": True, "result": result})
-        failed_results = [item for item in results if not item.get("ok")]
-        if failed_results:
-            errors = "; ".join(str(item.get("error", "")) for item in results if item.get("error"))
-            raise RuntimeError(
-                f"飞书 Webhook 推送部分失败：{len(failed_results)}/{len(results)} 个目标失败：{errors}"
-            )
-        return results
-
-    app_target = resolve_feishu_app_target(cfg)
-    if app_target:
-        receive_id_type = app_target.get("receive_id_type", "chat_id")
-        receive_id = app_target.get("receive_id", "")
-        return [
-            {
-                "method": "app",
-                "message": "飞书自建应用推送成功。",
-                "receive_id_type": receive_id_type,
-                "receive_id": "<redacted>" if receive_id else "",
-                "result": post_to_feishu_app(app_target, text),
-            }
-        ]
-
-    raise RuntimeError(feishu_missing_target_message(cfg))
 
 
 def _event_is_new(event_id: str, sent_index: dict[str, str], cutoff: datetime) -> bool:
@@ -1055,12 +1223,267 @@ def record_history_batch(
     return indexed_events, batch_time
 
 
-def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def compact_batch_event(event: dict[str, Any]) -> dict[str, Any]:
+    compacted = {
+        "index": event.get("index"),
+        "eventId": str(event.get("eventId", "") or ""),
+        "compliantTitle": event.get("compliantTitle", ""),
+        "eventPublishDate": event.get("eventPublishDate", ""),
+        "signalLevel": event.get("signalLevel", ""),
+        "matched_keywords": event.get("matched_keywords", []),
+    }
+    for key in ("eventSource", "eventType", "isHighValue"):
+        if key in event:
+            compacted[key] = event.get(key)
+    return compacted
+
+
+def event_ref_keyword(batch: dict[str, Any], event: dict[str, Any]) -> str:
+    matched = event.get("matched_keywords")
+    if isinstance(matched, list):
+        for item in matched:
+            keyword = str(item or "").strip()
+            if keyword:
+                return keyword
+    keywords = batch.get("keywords")
+    if isinstance(keywords, list):
+        for item in keywords:
+            keyword = str(item or "").strip()
+            if keyword:
+                return keyword
+    keyword_label = str(batch.get("keyword_label", "") or "").strip()
+    keywords_from_label = split_keywords(keyword_label)
+    return keywords_from_label[0] if keywords_from_label else ""
+
+
+def resolve_event_ref_from_history(query: str, history: dict[str, Any]) -> dict[str, Any]:
+    ref = parse_event_ref(query)
+    batches = history.get("batches", [])
+    if not isinstance(batches, list) or not batches:
+        return {
+            "status": "not_found",
+            "reason": "no_push_history",
+            "message": "未在最近的推送记录中找到该事件；当前没有可用推送批次。",
+            "ref": ref,
+            "latest_events": [],
+        }
+
+    batch_offset = int(ref.get("batch_offset", 0) or 0)
+    if batch_offset >= len(batches):
+        return {
+            "status": "not_found",
+            "reason": "batch_not_found",
+            "message": "未在最近的推送记录中找到该事件；指定的历史批次不存在。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in batches[0].get("events", [])],
+        }
+
+    batch = batches[batch_offset]
+    events = batch.get("events", [])
+    if not isinstance(events, list) or not events:
+        return {
+            "status": "not_found",
+            "reason": "empty_batch",
+            "message": "未在最近的推送记录中找到该事件；该批次没有事件。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in batches[0].get("events", [])],
+        }
+
+    index = ref.get("index")
+    if isinstance(index, int) and index > 0:
+        for pos, event in enumerate(events, start=1):
+            event_index = event.get("index", pos)
+            try:
+                event_index_int = int(event_index)
+            except (TypeError, ValueError):
+                event_index_int = pos
+            if event_index_int == index:
+                return {
+                    "status": "matched",
+                    "match_type": "index",
+                    "ref": ref,
+                    "batch": {
+                        "push_time": batch.get("push_time", ""),
+                        "keyword_label": batch.get("keyword_label", ""),
+                        "source": batch.get("source", ""),
+                        "batch_offset": batch_offset,
+                    },
+                    "keyword": event_ref_keyword(batch, event),
+                    "event": event,
+                }
+        return {
+            "status": "not_found",
+            "reason": "index_not_found",
+            "message": f"未在最近的推送记录中找到第 {index} 条事件。",
+            "ref": ref,
+            "latest_events": [compact_batch_event(item) for item in events],
+        }
+
+    title_keyword = str(ref.get("title_keyword", "") or "").casefold()
+    if title_keyword:
+        candidates: list[dict[str, Any]] = []
+        for event in events:
+            haystack = "\n".join(
+                str(event.get(key, "") or "")
+                for key in ("compliantTitle", "summary", "original_summary")
+            ).casefold()
+            if title_keyword in haystack:
+                candidates.append(event)
+        if len(candidates) == 1:
+            event = candidates[0]
+            return {
+                "status": "matched",
+                "match_type": "title_keyword",
+                "ref": ref,
+                "batch": {
+                    "push_time": batch.get("push_time", ""),
+                    "keyword_label": batch.get("keyword_label", ""),
+                    "source": batch.get("source", ""),
+                    "batch_offset": batch_offset,
+                },
+                "keyword": event_ref_keyword(batch, event),
+                "event": event,
+            }
+        if len(candidates) > 1:
+            return {
+                "status": "ambiguous",
+                "reason": "multiple_title_matches",
+                "message": "在最近推送中匹配到多条事件，请指定序号。",
+                "ref": ref,
+                "candidates": [compact_batch_event(item) for item in candidates],
+            }
+
+    return {
+        "status": "not_found",
+        "reason": "no_match",
+        "message": "该问题不在最近推送事件范围内；如需继续，我会显式说明并改用其他数据源生成报告。",
+        "ref": ref,
+        "latest_events": [compact_batch_event(item) for item in events],
+    }
+
+
+def detail_from_history_ref(query: str) -> dict[str, Any]:
+    cfg = load_runtime_config()
+    history = load_history(retention_days=cfg["retention_days"])
+    prune_history(history, retention_days=cfg["retention_days"])
+    resolved = resolve_event_ref_from_history(query, history)
+    if resolved.get("status") != "matched":
+        return resolved
+
+    if not has_event_api_key(cfg):
+        raise RuntimeError(event_api_key_missing_message())
+    apply_runtime_event_api_key(cfg, reset_client=True)
+
+    event = resolved.get("event", {})
+    event_id = str(event.get("eventId", "") or "")
+    if not event_id:
+        return {
+            "status": "not_found",
+            "reason": "missing_event_id",
+            "message": "最近推送记录中找到了该事件，但缺少 eventId，无法调用 deepseekdata 详情接口。",
+            "resolved": resolved,
+        }
+    if str(resolved.get("batch", {}).get("source", "") or "").startswith("reportserver_event_analysis_list"):
+        publish = str(event.get("eventPublishDate", "") or "")
+        detail_start = ""
+        detail_end = ""
+        if publish:
+            try:
+                publish_dt = parse_bjt_datetime(publish, field_name="eventPublishDate")
+                detail_start = (publish_dt - timedelta(minutes=5)).strftime(DATE_FMT)
+                detail_end = (publish_dt + timedelta(minutes=5)).strftime(DATE_FMT)
+            except RuntimeError:
+                detail_start = ""
+                detail_end = ""
+        detail = _event_query.get_event_detail_from_structured_list(
+            event_id=event_id,
+            event_publish_date_start=detail_start or None,
+            event_publish_date_end=detail_end or None,
+            event_source=event.get("eventSource") or None,
+            event_type=event.get("eventType") or None,
+        )
+        if detail:
+            return {
+                "status": "ok",
+                "source": "reportserver_event_analysis_list",
+                "message": "已从最近查询记录中匹配，并通过普通事件列表接口获取详情。",
+                "eventId": event_id,
+                "resolved": {
+                    **resolved,
+                    "event": compact_batch_event(event),
+                },
+                "detail": detail,
+            }
+        return {
+            "status": "not_found",
+            "reason": "structured_detail_not_found",
+            "message": "已在最近查询记录中找到该事件，但普通事件列表接口未返回详情。",
+            "resolved": {
+                **resolved,
+                "event": compact_batch_event(event),
+            },
+        }
+    keyword = str(resolved.get("keyword", "") or "").strip()
+    if not keyword:
+        return {
+            "status": "not_found",
+            "reason": "missing_keyword_for_semantic_detail",
+            "message": "最近记录中找到了该事件，但缺少关键词，无法调用语义详情接口。",
+            "resolved": {
+                **resolved,
+                "event": compact_batch_event(event),
+            },
+        }
+    detail_func = getattr(_event_query, "get_event_detail")
+    detail = detail_func(keyword=keyword, event_id=event_id)
+    if not detail:
+        return {
+            "status": "not_found",
+            "reason": "detail_not_found",
+            "message": "已在最近推送中找到该事件，但 deepseekdata 详情接口未返回详情。",
+            "resolved": {
+                **resolved,
+                "event": compact_batch_event(event),
+            },
+        }
+    return {
+        "status": "ok",
+        "source": "deepseekdata_api",
+        "message": "已从最近推送事件中匹配，并通过 deepseekdata API 获取详情。",
+        "keyword": keyword,
+        "eventId": event_id,
+        "resolved": {
+            **resolved,
+            "event": compact_batch_event(event),
+        },
+        "detail": detail,
+    }
+
+
+
+def _emit_stream(sink: StreamSink | None, text: str) -> None:
+    if sink is None:
+        return
+    sink(text)
+
+
+def _stdout_stream_sink(text: str) -> None:
+    print(text, flush=True)
+
+
+def run_once(
+    force: bool = False,
+    dry_run: bool = False,
+    openclaw_output: bool = False,
+    stream_sink: StreamSink | None = None,
+) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
+    _emit_stream(stream_sink, "Event Intelligence: runtime config loaded.")
 
     retention_days = cfg["retention_days"]
     history = load_history(retention_days=retention_days)
     prune_history(history, retention_days=retention_days)
+    _emit_stream(stream_sink, "Event Intelligence: history loaded and pruned.")
 
     if not cfg["active"] and not force:
         history["last_run_time"] = to_iso(now_bjt())
@@ -1077,21 +1500,30 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    if not has_feishu_target(cfg) and not dry_run:
-        raise RuntimeError(feishu_missing_target_message(cfg))
-
     lookback_minutes = schedule_lookback_minutes(cfg["schedule"])
     page_size = cfg["page_size"]
-    keywords = validate_keywords(cfg.get("keywords"))
+    keywords = validate_keywords(cfg.get("keywords"), default_to_ai=False)
     keyword_label = keywords_label(keywords)
+    _emit_stream(
+        stream_sink,
+        f"Event Intelligence: querying deepseekdata for {keyword_label or 'no keyword'}, lookback={lookback_minutes}m, page_size={page_size}.",
+    )
 
-    result = search_events_for_keywords(
+    result = query_events_unified(
         keywords=keywords,
         minutes=lookback_minutes,
         page_size=page_size,
+        cfg=cfg,
+        event_source=cfg.get("event_source", ""),
+        event_type=cfg.get("event_type", ""),
+        is_high_value=cfg.get("is_high_value", ""),
+        max_events=page_size,
     )
-    raw_events = result.get("events", [])
-    compacted = [compact_event(item) for item in raw_events if isinstance(item, dict)]
+    _emit_stream(
+        stream_sink,
+        f"Event Intelligence: query finished, raw_hits={int(result.get('sum_keyword_total', 0) or 0)}, merged={int(result.get('total', 0) or 0)}.",
+    )
+    compacted = [item for item in result.get("events", []) if isinstance(item, dict)]
 
     cutoff = now_bjt() - timedelta(days=retention_days)
     sent_index = history.get("sent_event_index", {})
@@ -1113,41 +1545,49 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
 
     if not new_events:
         save_history(history)
+        _emit_stream(stream_sink, "Event Intelligence: no new events; skipped delivery.")
         return {
             "status": "ok",
             "total": int(result.get("total", 0) or 0),
             "sum_keyword_total": int(result.get("sum_keyword_total", 0) or 0),
             "totals_by_keyword": result.get("totals_by_keyword", {}),
             "keywords": keywords,
+            "source": result.get("source", ""),
             "pushed": 0,
             "reason": "no_new_events",
             "message": "本次没有发现新的事件，不需要推送。",
             "run_time": run_time,
             "lookback_minutes": lookback_minutes,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     text = build_push_text(
-        keyword=keyword_label,
+        keyword=result.get("keyword_label") or keyword_label or "无关键词",
         minutes=lookback_minutes,
         events=new_events,
         total=int(result.get("total", 0) or 0),
         max_items=page_size,
         totals_by_keyword=result.get("totals_by_keyword", {}),
     )
+    _emit_stream(stream_sink, f"Event Intelligence: formatted {len(new_events)} new events.")
 
-    feishu_results = post_text_to_feishu(cfg, text, dry_run=dry_run)
+    _emit_stream(stream_sink, "Event Intelligence: output formatted.")
     real_sent = not dry_run
 
+    history_source = "runtime" if result.get("mode") == "keyword" else "reportserver_event_analysis_list_runtime"
+    if not real_sent and result.get("mode") != "keyword":
+        history_source = "reportserver_event_analysis_list_runtime_dry_run"
     indexed_events, batch_time = record_history_batch(
         history,
         keywords=keywords,
         events=new_events,
-        source="runtime" if real_sent else "runtime_dry_run",
+        source=history_source if real_sent else ("runtime_dry_run" if result.get("mode") == "keyword" else history_source),
         retention_days=retention_days,
         update_sent_index=real_sent,
         update_last_push_time=real_sent,
     )
     save_history(history)
+    _emit_stream(stream_sink, "Event Intelligence: history saved.")
     if real_sent:
         cfg["last_push_time"] = batch_time
         save_json(PUSH_CONFIG_PATH, cfg)
@@ -1159,11 +1599,13 @@ def run_once(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
         "sum_keyword_total": int(result.get("sum_keyword_total", 0) or 0),
         "totals_by_keyword": result.get("totals_by_keyword", {}),
         "keywords": keywords,
+        "source": result.get("source", ""),
+        "query": result.get("query", {}),
         "pushed": len(indexed_events),
         "lookback_minutes": lookback_minutes,
         "run_time": run_time,
         "last_push_time": batch_time if real_sent else "",
-        "feishu": feishu_results,
+        "openclaw_announce_text": text if openclaw_output else "",
         "events": indexed_events,
     }
 
@@ -1173,37 +1615,62 @@ def manual_push(
     keywords: str | list[str] | None = None,
     minutes: int = 60,
     page_size: int | None = None,
+    event_source: str = "",
+    event_type: str = "",
+    is_high_value: Any = None,
     dry_run: bool = False,
-    no_feishu: bool = False,
+    no_delivery: bool = False,
+    openclaw_output: bool = False,
+    stream_sink: StreamSink | None = None,
 ) -> dict[str, Any]:
     cfg = load_runtime_config()
+    _emit_stream(stream_sink, "Event Intelligence: runtime config loaded.")
     apply_runtime_event_api_key(cfg, reset_client=True)
+    apply_runtime_filter_observability(cfg)
     retention_days = cfg["retention_days"]
     history = load_history(retention_days=retention_days)
     prune_history(history, retention_days=retention_days)
+    _emit_stream(stream_sink, "Event Intelligence: history loaded and pruned.")
 
     if keywords is not None:
-        resolved_keywords = validate_keywords(keywords)
+        resolved_keywords = validate_keywords(keywords, default_to_ai=False)
     else:
-        resolved_keywords = validate_keywords(cfg.get("keywords"))
+        resolved_keywords = validate_keywords(cfg.get("keywords"), default_to_ai=False)
     resolved_keyword = keywords_label(resolved_keywords)
     resolved_minutes = max(1, int(minutes or 60))
     resolved_page_size = page_size if page_size and page_size > 0 else cfg["page_size"]
     resolved_page_size = max(1, min(int(resolved_page_size), 30))
+    resolved_event_source = event_source if event_source != "" else str(cfg.get("event_source", "") or "")
+    resolved_event_type = event_type if event_type != "" else str(cfg.get("event_type", "") or "")
+    resolved_is_high_value = (
+        is_high_value
+        if is_high_value not in (None, "")
+        else str(cfg.get("is_high_value", "") or "")
+    )
 
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    if not no_feishu and not dry_run and not has_feishu_target(cfg):
-        raise RuntimeError(feishu_missing_target_message(cfg))
+    _emit_stream(
+        stream_sink,
+        f"Event Intelligence: querying deepseekdata for {resolved_keyword or 'no keyword'}, lookback={resolved_minutes}m, page_size={resolved_page_size}.",
+    )
 
-    result = search_events_for_keywords(
+    result = query_events_unified(
         keywords=resolved_keywords,
         minutes=resolved_minutes,
         page_size=resolved_page_size,
+        cfg=cfg,
+        event_source=resolved_event_source,
+        event_type=resolved_event_type,
+        is_high_value=resolved_is_high_value,
+        max_events=resolved_page_size,
     )
-    raw_events = result.get("events", [])
-    compacted = [compact_event(item) for item in raw_events if isinstance(item, dict)]
+    _emit_stream(
+        stream_sink,
+        f"Event Intelligence: query finished, raw_hits={int(result.get('sum_keyword_total', 0) or 0)}, merged={int(result.get('total', 0) or 0)}.",
+    )
+    compacted = [item for item in result.get("events", []) if isinstance(item, dict)]
 
     run_time = to_iso(now_bjt())
     history["last_run_time"] = run_time
@@ -1211,6 +1678,7 @@ def manual_push(
 
     if not compacted:
         save_history(history)
+        _emit_stream(stream_sink, "Event Intelligence: no events found; history saved.")
         return {
             "status": "ok",
             "source": "manual",
@@ -1218,15 +1686,17 @@ def manual_push(
             "sum_keyword_total": int(result.get("sum_keyword_total", 0) or 0),
             "totals_by_keyword": result.get("totals_by_keyword", {}),
             "keywords": resolved_keywords,
+            "source": result.get("source", ""),
             "pushed": 0,
             "reason": "no_events",
             "message": "没有查询到可推送的事件。",
             "run_time": run_time,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
             "events": [],
         }
 
     text = build_push_text(
-        keyword=resolved_keyword,
+        keyword=result.get("keyword_label") or resolved_keyword or "无关键词",
         minutes=resolved_minutes,
         events=compacted,
         total=int(result.get("total", 0) or 0),
@@ -1234,24 +1704,30 @@ def manual_push(
         max_items=resolved_page_size,
         totals_by_keyword=result.get("totals_by_keyword", {}),
     )
+    _emit_stream(stream_sink, f"Event Intelligence: formatted {len(compacted)} events.")
 
-    feishu_results: list[dict[str, Any]] = []
-    if no_feishu:
-        feishu_results.append({"method": "disabled", "message": "已按参数跳过飞书发送。", "result": {"ok": True}})
+    real_sent = not dry_run and not no_delivery
+
+    if result.get("mode") == "keyword":
+        history_source = "manual" if real_sent else ("manual_no_delivery" if no_delivery else "manual_dry_run")
     else:
-        feishu_results = post_text_to_feishu(cfg, text, dry_run=dry_run)
-    real_sent = not dry_run and not no_feishu
+        history_source = (
+            "reportserver_event_analysis_list"
+            if real_sent
+            else ("reportserver_event_analysis_list_no_delivery" if no_delivery else "reportserver_event_analysis_list_dry_run")
+        )
 
     indexed_events, batch_time = record_history_batch(
         history,
         keywords=resolved_keywords,
         events=compacted,
-        source="manual" if real_sent else ("manual_no_feishu" if no_feishu else "manual_dry_run"),
+        source=history_source,
         retention_days=retention_days,
         update_sent_index=real_sent,
         update_last_push_time=real_sent,
     )
     save_history(history)
+    _emit_stream(stream_sink, "Event Intelligence: history saved.")
     if real_sent:
         cfg["last_push_time"] = batch_time
         save_json(PUSH_CONFIG_PATH, cfg)
@@ -1264,16 +1740,18 @@ def manual_push(
         "sum_keyword_total": int(result.get("sum_keyword_total", 0) or 0),
         "totals_by_keyword": result.get("totals_by_keyword", {}),
         "keywords": resolved_keywords,
+        "source": result.get("source", ""),
+        "query": result.get("query", {}),
         "pushed": len(indexed_events),
         "run_time": run_time,
         "last_push_time": batch_time if real_sent else "",
-        "feishu": feishu_results,
+        "openclaw_announce_text": text if openclaw_output else "",
         "text": text,
         "events": indexed_events,
     }
 
 
-def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def run_daily(force: bool = False, dry_run: bool = False, openclaw_output: bool = False) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
 
     if not cfg["active"] and not force:
@@ -1281,28 +1759,35 @@ def run_daily(force: bool = False, dry_run: bool = False) -> dict[str, Any]:
             "status": "skipped",
             "reason": "daily_summary_inactive",
             "message": "运行时推送未开启，本次未执行每日统计。",
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    if not has_feishu_target(cfg) and not dry_run:
-        raise RuntimeError(feishu_missing_target_message(cfg))
 
-    keywords = validate_keywords(cfg.get("keywords"))
-    keyword = keywords_label(keywords)
-    summary = daily_event_summary_many(keywords=keywords, minutes=1440)
+    keywords = validate_keywords(cfg.get("keywords"), default_to_ai=False)
+    keyword = keywords_label(keywords) if keywords else "无关键词"
+    if keywords:
+        summary = daily_event_summary_many(keywords=keywords, minutes=1440)
+    else:
+        summary = structured_daily_summary(cfg=cfg, minutes=1440)
     if int(summary.get("total", 0) or 0) <= 0:
         return {
             "status": "ok",
             "reason": "no_daily_events",
             "message": "过去 24 小时没有查询到可统计的事件。",
             "summary": summary,
+            "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
     text = build_daily_summary_text(keyword_label=keyword, result=summary)
-    feishu_results = post_text_to_feishu(cfg, text, dry_run=dry_run)
-    return {"status": "ok", "message": "每日事件统计已生成并发送。", "summary": summary, "feishu": feishu_results}
+    return {
+        "status": "ok",
+        "message": "每日事件统计已生成并发送。",
+        "summary": summary,
+        "openclaw_announce_text": text if openclaw_output else "",
+    }
 
 
 def _is_hhmm(value: str) -> bool:
@@ -1317,118 +1802,126 @@ def _is_hhmm(value: str) -> bool:
     return 0 <= hour <= 23 and 0 <= minute <= 59
 
 
+def _cron_agent_message(command: str) -> str:
+    return (
+        "Run the event-intelligence runtime command below immediately in the workspace. "
+        "Do not read documentation or explain the workflow. Keep the final answer concise: results plus a brief source note only.\n\n"
+        f"Command:\n{command}\n\n"
+        "Rules:\n"
+        "- If the command output is not exactly NO_REPLY, reply with the command output only; add no preface or markdown wrapper.\n"
+        "- If the command output is exactly NO_REPLY, reply exactly NO_REPLY.\n"
+        "- Do not repeat status JSON, credential state details, config paths, or inspection steps to the user.\n"
+        "- Use only deepseekdata API results and do not supplement empty results from any other source."
+    )
+
+
+def _cron_job(
+    *,
+    name: str,
+    schedule_cron: str,
+    command: str,
+    timezone: str = "Asia/Shanghai",
+    timeout_seconds: int = 900,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "enabled": True,
+        "schedule": {
+            "kind": "cron",
+            "expr": schedule_cron,
+            "tz": timezone,
+        },
+        "sessionTarget": "isolated",
+        "payload": {
+            "kind": "agentTurn",
+            "message": _cron_agent_message(command),
+            "timeoutSeconds": timeout_seconds,
+        },
+    }
+
+
+def _openclaw_json_command(job: dict[str, Any]) -> str:
+    payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
+    return f"openclaw cron add --json {shlex.quote(payload)}"
+
+
+def _install_openclaw_cron_jobs(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    openclaw_bin = shutil.which("openclaw")
+    if not openclaw_bin:
+        return {"attempted": False, "installed": False, "reason": "openclaw_cli_not_found"}
+
+    installed: list[dict[str, Any]] = []
+    for job in jobs:
+        payload = json.dumps(job, ensure_ascii=False)
+        proc = subprocess.run(
+            [openclaw_bin, "cron", "add", "--json", payload],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return {
+                "attempted": True,
+                "installed": False,
+                "failed_job": job.get("name", ""),
+                "error": (proc.stderr or proc.stdout or "openclaw cron add failed").strip(),
+            }
+        installed.append({"name": job.get("name", ""), "stdout": proc.stdout.strip()})
+
+    return {"attempted": True, "installed": True, "jobs": installed}
+
+
 def install_schedule(task_name: str | None = None) -> dict[str, Any]:
     cfg = load_and_persist_runtime_config()
+    resolved_name = (task_name or cfg.get("task_name") or DEFAULT_TASK_NAME).strip() or DEFAULT_TASK_NAME
 
-    resolved_name = (task_name or cfg.get("task_name") or DEFAULT_TASK_NAME).strip()
-    if not resolved_name:
-        resolved_name = DEFAULT_TASK_NAME
-
-    return install_unix_cron(resolved_name, cfg["schedule"], cfg["active"], cfg["daily_summary_time"])
-
-
-def _read_crontab() -> list[str]:
-    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    if proc.returncode == 0:
-        return [line.rstrip("\n") for line in proc.stdout.splitlines()]
-    err = (proc.stderr or "").lower()
-    if "no crontab" in err:
-        return []
-    detail = (proc.stderr or proc.stdout or "未知错误").strip()
-    raise RuntimeError(f"读取 crontab 失败：{detail}")
-
-
-def _write_crontab(lines: list[str]) -> None:
-    payload = "\n".join(lines).rstrip() + "\n"
-    proc = subprocess.run(["crontab", "-"], input=payload, text=True, capture_output=True)
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "未知错误").strip()
-        raise RuntimeError(f"写入 crontab 失败：{detail}")
-
-
-def _drop_marked_cron(lines: list[str], marker_prefix: str) -> list[str]:
-    out: list[str] = []
-    skip_next = False
-    for line in lines:
-        if skip_next:
-            skip_next = False
-            if _looks_like_cron_line(line):
-                continue
-        stripped = line.strip()
-        if stripped.startswith(marker_prefix):
-            skip_next = True
-            continue
-        out.append(line)
-    return out
-
-
-def _looks_like_cron_line(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
-        return False
-    if stripped.startswith("@"):
-        return len(stripped.split(maxsplit=1)) == 2
-    return len(stripped.split(maxsplit=5)) == 6
-
-
-def _cron_run_once_line(schedule: str, python_bin: str, script: str) -> str:
-    preset = SCHEDULE_PRESETS[validate_schedule(schedule)]
-    run_cmd = f"{python_bin} {script} run-once --quiet"
-    return f"{preset['cron']} {run_cmd} >/dev/null 2>&1"
-
-
-def install_unix_cron(
-    task_name: str,
-    schedule: str,
-    include_daily: bool,
-    daily_time: str,
-) -> dict[str, Any]:
     python_bin = shlex.quote(sys.executable)
     script = shlex.quote(str(Path(__file__).resolve()))
-    marker_prefix = f"# EVENT_INTELLIGENCE:{task_name}:"
-    lines = _read_crontab()
-    lines = _drop_marked_cron(lines, marker_prefix)
+    jobs = [
+        _cron_job(
+            name=f"{resolved_name}-main",
+            schedule_cron=str(SCHEDULE_PRESETS[cfg["schedule"]]["cron"]),
+            command=f"{python_bin} {script} run-once --openclaw-output",
+        )
+    ]
+    if cfg["active"]:
+        hh, mm = cfg["daily_summary_time"].split(":")
+        jobs.append(
+            _cron_job(
+                name=f"{resolved_name}-daily",
+                schedule_cron=f"{int(mm)} {int(hh)} * * *",
+                command=f"{python_bin} {script} run-daily-summary --openclaw-output",
+            )
+        )
 
-    lines.append(f"{marker_prefix}main")
-    lines.append(_cron_run_once_line(schedule, python_bin, script))
-
-    installed = ["main"]
-    if include_daily:
-        hh, mm = daily_time.split(":")
-        lines.append(f"{marker_prefix}daily")
-        lines.append(f"{int(mm)} {int(hh)} * * * {python_bin} {script} run-daily-summary --quiet >/dev/null 2>&1")
-        installed.append("daily")
-
-    _write_crontab(lines)
+    install_result = _install_openclaw_cron_jobs(jobs)
     return {
         "status": "ok",
-        "message": schedule_hint_message("已安装系统定时任务。", schedule),
-        "scheduler": "crontab",
-        "task_name": task_name,
-        "installed_jobs": installed,
-        "schedule": schedule,
-        "schedule_label": schedule_label(schedule),
+        "message": (
+            "已通过 OpenClaw cron 安装定时任务。"
+            if install_result.get("installed")
+            else "已生成 OpenClaw cron add 任务规格；当前环境未检测到 openclaw CLI 或安装失败时，可复制 commands 到 OpenClaw 环境执行。"
+        ),
+        "scheduler": "openclaw-cron",
+        "task_name": resolved_name,
+        "schedule": cfg["schedule"],
+        "schedule_label": schedule_label(cfg["schedule"]),
         "available_schedules": schedule_options_list(),
-        "lookback_minutes": schedule_lookback_minutes(schedule),
+        "lookback_minutes": schedule_lookback_minutes(cfg["schedule"]),
+        "openclaw_cli": install_result,
+        "jobs": jobs,
+        "commands": [_openclaw_json_command(job) for job in jobs],
     }
 
 
 def uninstall_schedule(task_name: str | None = None) -> dict[str, Any]:
     cfg = load_runtime_config()
-    resolved_name = (task_name or cfg.get("task_name") or DEFAULT_TASK_NAME).strip()
-    if not resolved_name:
-        resolved_name = DEFAULT_TASK_NAME
-
-    marker_prefix = f"# EVENT_INTELLIGENCE:{resolved_name}:"
-    lines = _read_crontab()
-    cleaned = _drop_marked_cron(lines, marker_prefix)
-    _write_crontab(cleaned)
+    resolved_name = (task_name or cfg.get("task_name") or DEFAULT_TASK_NAME).strip() or DEFAULT_TASK_NAME
     cfg["active"] = False
     save_json(PUSH_CONFIG_PATH, cfg)
     return {
         "status": "ok",
-        "message": "已卸载系统定时任务，并关闭运行时推送。",
-        "scheduler": "crontab",
+        "message": "已关闭运行时推送。OpenClaw cron 任务请在 Arkclaw/OpenClaw 平台停用或删除。",
+        "scheduler": "openclaw-cron",
         "task_name": resolved_name,
     }
 
@@ -1438,46 +1931,292 @@ def redacted_runtime_config(cfg: dict[str, Any]) -> dict[str, Any]:
     for key in ("event_intel_api_key", "api_key", "deepseekdata_api_key"):
         if str(safe_cfg.get(key, "") or "").strip():
             safe_cfg[key] = "<redacted>"
-    webhooks = safe_cfg.get("feishu_webhooks")
-    if isinstance(webhooks, list):
-        safe_cfg["feishu_webhooks"] = ["<redacted>" for item in webhooks if str(item or "").strip()]
-    elif str(webhooks or "").strip():
-        safe_cfg["feishu_webhooks"] = ["<redacted>"]
-    if str(safe_cfg.get("feishu_receive_id", "") or "").strip():
-        safe_cfg["feishu_receive_id"] = "<redacted>"
     return safe_cfg
+
+
+def public_runtime_summary(cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "active": cfg["active"],
+        "keywords": cfg["keywords"],
+        "event_source": cfg.get("event_source", ""),
+        "event_type": cfg.get("event_type", ""),
+        "is_high_value": cfg.get("is_high_value", ""),
+        "schedule": cfg["schedule"],
+        "schedule_label": schedule_label(cfg["schedule"]),
+        "lookback_minutes": schedule_lookback_minutes(cfg["schedule"]),
+        "page_size": cfg["page_size"],
+        "daily_summary_time": cfg["daily_summary_time"],
+    }
 
 
 def status() -> dict[str, Any]:
     cfg = load_runtime_config()
-    safe_cfg = redacted_runtime_config(cfg)
     history = load_history(retention_days=cfg["retention_days"])
     prune_history(history, retention_days=cfg["retention_days"])
     latest_batch = history["batches"][0] if history["batches"] else {}
     return {
         "status": "ok",
         "message": schedule_hint_message("运行时状态如下。", cfg["schedule"]),
-        "push_config": safe_cfg,
-        "feishu": feishu_config_diagnostic(cfg),
+        "runtime": public_runtime_summary(cfg),
         "event_api": {
             "has_key": has_event_api_key(cfg),
-            "stored_in_config": bool(
-                str(cfg.get("event_intel_api_key", "") or "").strip()
-                or str(cfg.get("api_key", "") or "").strip()
-                or str(cfg.get("deepseekdata_api_key", "") or "").strip()
-            ),
-            "endpoint": "https://admin.deepseekdata.com",
+            "detail": "configured" if has_event_api_key(cfg) else "missing",
+        },
+        "filter_observability": {
+            "mode": cfg.get("filter_observability", "off"),
         },
         "history": {
             "batches": len(history.get("batches", [])),
             "last_run_time": history.get("last_run_time", ""),
             "last_push_time": history.get("last_push_time", ""),
-            "last_error": history.get("last_error", ""),
+            "last_error": redact_sensitive_text(history.get("last_error", "")),
             "latest_batch_time": latest_batch.get("push_time", ""),
             "latest_batch_events": len(latest_batch.get("events", []))
             if isinstance(latest_batch.get("events"), list)
             else 0,
         },
+    }
+
+
+def _filter_metrics_path() -> Path:
+    return Path(getattr(_event_query, "RULE_FILTER_METRICS_PATH", STATE_DIR / "rule_filter_metrics.jsonl"))
+
+
+def _filter_rejections_path() -> Path:
+    return Path(getattr(_event_query, "RULE_FILTER_REJECTIONS_PATH", STATE_DIR / "rule_filter_rejections.jsonl"))
+
+
+def _filter_candidates_path() -> Path:
+    return Path(getattr(_event_query, "RULE_FILTER_CANDIDATES_PATH", STATE_DIR / "rule_filter_candidates.jsonl"))
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                rows.append(item)
+    except OSError:
+        return []
+    return rows
+
+
+def _parse_metric_ts(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=BJT)
+    return parsed.astimezone(BJT)
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def filter_metrics_summary(*, hours: int = 24, limit_reasons: int = 20) -> dict[str, Any]:
+    hours = max(1, int(hours or 24))
+    cutoff = now_bjt() - timedelta(hours=hours)
+    metrics_path = _filter_metrics_path()
+    rejections_path = _filter_rejections_path()
+
+    all_rows = _load_jsonl(metrics_path)
+    rows = []
+    for row in all_rows:
+        ts = _parse_metric_ts(row.get("ts"))
+        if ts and ts >= cutoff:
+            rows.append(row)
+
+    totals = {
+        "runs": len(rows),
+        "api_total": 0,
+        "fetched_count": 0,
+        "score_filtered_count": 0,
+        "score_removed_count": 0,
+        "rule_filtered_count": 0,
+        "rule_removed_count": 0,
+        "returned_count": 0,
+    }
+    by_keyword: dict[str, dict[str, Any]] = {}
+    reason_counts: Counter = Counter()
+    by_window: dict[str, dict[str, int]] = {}
+
+    for row in rows:
+        keyword = str(row.get("keyword", "") or "unknown")
+        keyword_bucket = by_keyword.setdefault(
+            keyword,
+            {
+                "runs": 0,
+                "api_total": 0,
+                "fetched_count": 0,
+                "score_filtered_count": 0,
+                "score_removed_count": 0,
+                "rule_filtered_count": 0,
+                "rule_removed_count": 0,
+                "returned_count": 0,
+            },
+        )
+        window_key = str(row.get("window_minutes", "") or "unknown")
+        window_bucket = by_window.setdefault(
+            window_key,
+            {
+                "runs": 0,
+                "score_filtered_count": 0,
+                "rule_filtered_count": 0,
+                "rule_removed_count": 0,
+            },
+        )
+
+        keyword_bucket["runs"] += 1
+        window_bucket["runs"] += 1
+        totals["runs"] = len(rows)
+        for key in (
+            "api_total",
+            "fetched_count",
+            "score_filtered_count",
+            "score_removed_count",
+            "rule_filtered_count",
+            "rule_removed_count",
+            "returned_count",
+        ):
+            value = _int_value(row.get(key))
+            totals[key] += value
+            keyword_bucket[key] += value
+            if key in window_bucket:
+                window_bucket[key] += value
+
+        raw_reasons = row.get("ruleFilterReason_counts", {})
+        if isinstance(raw_reasons, dict):
+            for reason, count in raw_reasons.items():
+                reason_counts[str(reason)] += _int_value(count)
+
+    rejection_rows = []
+    for row in _load_jsonl(rejections_path):
+        ts = _parse_metric_ts(row.get("ts"))
+        if ts and ts >= cutoff:
+            rejection_rows.append(row)
+
+    return {
+        "status": "ok",
+        "message": f"最近 {hours} 小时 rule filter 观测指标。",
+        "window_hours": hours,
+        "observability_mode": load_runtime_config().get("filter_observability", "off"),
+        "metrics_file": str(metrics_path),
+        "rejections_file": str(rejections_path),
+        "candidates_file": str(_filter_candidates_path()),
+        "totals": totals,
+        "by_keyword": [
+            {"keyword": keyword, **counts}
+            for keyword, counts in sorted(by_keyword.items())
+        ],
+        "by_window_minutes": [
+            {"window_minutes": window, **counts}
+            for window, counts in sorted(by_window.items(), key=lambda item: item[0])
+        ],
+        "ruleFilterReason_distribution": [
+            {"reason": reason, "count": count}
+            for reason, count in reason_counts.most_common(max(1, limit_reasons))
+        ],
+        "recent_rejections": [
+            {
+                "ts": row.get("ts"),
+                "keyword": row.get("keyword"),
+                "eventId": row.get("eventId"),
+                "title": row.get("title"),
+                "ruleFilterReason": row.get("ruleFilterReason"),
+                "matchedIncludeTerms": row.get("matchedIncludeTerms", []),
+                "matchedExcludeTerms": row.get("matchedExcludeTerms", []),
+            }
+            for row in rejection_rows[-20:]
+        ],
+    }
+
+
+def filter_candidates(
+    *,
+    hours: int = 24,
+    keyword: str = "",
+    limit_batches: int = 10,
+    limit_candidates: int = 200,
+) -> dict[str, Any]:
+    hours = max(1, int(hours or 24))
+    cutoff = now_bjt() - timedelta(hours=hours)
+    keyword_filter = str(keyword or "").strip()
+    path = _filter_candidates_path()
+    batches = []
+    candidate_count = 0
+    for row in reversed(_load_jsonl(path)):
+        ts = _parse_metric_ts(row.get("ts"))
+        if not ts or ts < cutoff:
+            continue
+        if keyword_filter and str(row.get("keyword", "") or "") != keyword_filter:
+            continue
+        candidates = row.get("candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+        remaining = max(0, limit_candidates - candidate_count)
+        if remaining <= 0:
+            break
+        projected_candidates = candidates[:remaining]
+        candidate_count += len(projected_candidates)
+        batches.append(
+            {
+                "ts": row.get("ts"),
+                "keyword": row.get("keyword"),
+                "window_minutes": row.get("window_minutes"),
+                "requested_page_size": row.get("requested_page_size"),
+                "fetch_size": row.get("fetch_size"),
+                "candidate_count": len(candidates),
+                "candidates": projected_candidates,
+            }
+        )
+        if len(batches) >= max(1, int(limit_batches or 10)):
+            break
+    batches.reverse()
+    return {
+        "status": "ok",
+        "message": f"最近 {hours} 小时 filter debug 候选链路。仅在 filter_observability=debug 时产生数据。",
+        "window_hours": hours,
+        "keyword": keyword_filter,
+        "observability_mode": load_runtime_config().get("filter_observability", "off"),
+        "candidates_file": str(path),
+        "batches": batches,
+    }
+
+
+def clear_filter_observability_files() -> dict[str, Any]:
+    paths = [_filter_metrics_path(), _filter_rejections_path(), _filter_candidates_path()]
+    removed = []
+    missing = []
+    errors = []
+    for path in paths:
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(str(path))
+            else:
+                missing.append(str(path))
+        except OSError as exc:
+            errors.append({"path": str(path), "error": str(exc)})
+    return {
+        "status": "ok" if not errors else "partial",
+        "message": "过滤观测文件已清理。" if not errors else "部分过滤观测文件清理失败。",
+        "removed": removed,
+        "missing": missing,
+        "errors": errors,
     }
 
 
@@ -1507,13 +2246,14 @@ def run_loop(force: bool = False, dry_run: bool = False, max_iterations: int = 0
                 result = run_once(force=force, dry_run=dry_run)
                 print(json.dumps({"loop_iteration": iteration, "result": result}, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
+                detail = redact_sensitive_text(exc)
                 history = load_history(retention_days=cfg["retention_days"])
                 history["last_run_time"] = to_iso(now_bjt())
-                history["last_error"] = str(exc)
+                history["last_error"] = detail
                 save_history(history)
                 print(
                     json.dumps(
-                        {"loop_iteration": iteration, "status": "error", "detail": str(exc)},
+                        {"loop_iteration": iteration, "status": "error", "detail": detail},
                         ensure_ascii=False,
                     )
                 )
@@ -1538,7 +2278,6 @@ def cmd_init_config(args: argparse.Namespace) -> int:
                     "status": "skipped",
                     "reason": "config_exists",
                     "message": "运行时配置已存在，未覆盖。需要覆盖时请加 --force。",
-                    "path": str(PUSH_CONFIG_PATH),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1551,8 +2290,8 @@ def cmd_init_config(args: argparse.Namespace) -> int:
             {
                 "status": "ok",
                 "message": "已创建运行时配置。",
-                "path": str(PUSH_CONFIG_PATH),
-                "config": redacted_runtime_config(cfg),
+                "runtime": public_runtime_summary(cfg),
+                "event_api": {"has_key": has_event_api_key(cfg)},
             },
             ensure_ascii=False,
             indent=2,
@@ -1562,7 +2301,15 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 
 def cmd_run_once(args: argparse.Namespace) -> int:
-    result = run_once(force=args.force, dry_run=args.dry_run)
+    result = run_once(
+        force=args.force,
+        dry_run=args.dry_run,
+        openclaw_output=args.openclaw_output,
+        stream_sink=_stdout_stream_sink if args.stream else None,
+    )
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     if not args.quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1570,18 +2317,50 @@ def cmd_run_once(args: argparse.Namespace) -> int:
 
 def cmd_manual_push(args: argparse.Namespace) -> int:
     result = manual_push(
-        keywords=args.keywords or None,
+        keywords=args.keywords,
         minutes=args.minutes,
         page_size=args.page_size or None,
+        event_source=args.event_source,
+        event_type=args.event_type,
+        is_high_value=args.is_high_value,
         dry_run=args.dry_run,
-        no_feishu=args.no_feishu,
+        no_delivery=args.no_delivery,
+        openclaw_output=args.openclaw_output,
+        stream_sink=_stdout_stream_sink if args.stream else None,
     )
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_list_events(args: argparse.Namespace) -> int:
+    result = structured_event_list(
+        start=args.start,
+        end=args.end,
+        minutes=args.minutes,
+        event_source=args.event_source,
+        event_type=args.event_type,
+        is_high_value=args.is_high_value,
+        page_size=args.page_size,
+        limit=args.limit,
+        no_delivery=args.no_delivery,
+        openclaw_output=args.openclaw_output,
+        stream_sink=_stdout_stream_sink if args.stream else None,
+    )
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_run_daily(args: argparse.Namespace) -> int:
-    result = run_daily(force=args.force, dry_run=args.dry_run)
+    result = run_daily(force=args.force, dry_run=args.dry_run, openclaw_output=args.openclaw_output)
+    if args.openclaw_output:
+        print(result.get("openclaw_announce_text") or OPENCLAW_NO_REPLY)
+        return 0
     if not args.quiet:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1606,26 +2385,14 @@ def cmd_configure(args: argparse.Namespace) -> int:
     result = configure_runtime(
         active=active,
         keywords=args.keywords,
+        event_source=args.event_source,
+        event_type=args.event_type,
+        is_high_value=args.is_high_value,
         schedule=args.schedule,
         page_size=args.page_size,
         daily_summary_time=args.daily_summary_time,
+        filter_observability=args.filter_observability,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_set_feishu_target(args: argparse.Namespace) -> int:
-    result = set_feishu_target(args.receive_id, args.receive_id_type)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_set_feishu_webhook(args: argparse.Namespace) -> int:
-    if args.url_file:
-        url = read_secret_file(args.url_file)
-    else:
-        url = sys.stdin.read().strip() if args.url == "-" else args.url
-    result = set_feishu_webhook(url, append=args.append)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -1644,6 +2411,41 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_status(_: argparse.Namespace) -> int:
     print(json.dumps(status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_metrics_summary(args: argparse.Namespace) -> int:
+    hours = args.hours
+    if args.days:
+        hours = args.days * 24
+    result = filter_metrics_summary(hours=hours, limit_reasons=args.limit_reasons)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_filter_candidates(args: argparse.Namespace) -> int:
+    hours = args.hours
+    if args.days:
+        hours = args.days * 24
+    result = filter_candidates(
+        hours=hours,
+        keyword=args.keyword,
+        limit_batches=args.limit_batches,
+        limit_candidates=args.limit_candidates,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_clear_filter_observability(_: argparse.Namespace) -> int:
+    result = clear_filter_observability_files()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_detail_from_ref(args: argparse.Namespace) -> int:
+    result = detail_from_history_ref(args.query)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1721,23 +2523,48 @@ def build_parser() -> argparse.ArgumentParser:
     run_once_parser.add_argument("--force", action="store_true")
     run_once_parser.add_argument("--dry-run", action="store_true")
     run_once_parser.add_argument("--quiet", action="store_true")
+    run_once_parser.add_argument("--stream", action="store_true", help="print progress updates as soon as each stage starts or finishes")
+    run_once_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     run_once_parser.set_defaults(func=cmd_run_once)
 
     manual_parser = sub.add_parser(
         "manual-push",
-        help="手动拉取事件、推送飞书并记录历史",
+        help="\u624b\u52a8\u62c9\u53d6\u4e8b\u4ef6\u5e76\u8bb0\u5f55\u5386\u53f2",
     )
-    manual_parser.add_argument("--keywords", default="", help="多个关键词用逗号、顿号、分号或斜杠分隔；最多 3 个")
+    manual_parser.add_argument("--keywords", default=None, help="多个关键词用逗号、顿号、分号或斜杠分隔；传空字符串表示无关键词")
     manual_parser.add_argument("--minutes", type=int, default=60)
     manual_parser.add_argument("--page-size", type=int, default=0)
+    manual_parser.add_argument("--event-source", default="", help="无关键词结构化查询的事件来源，模糊匹配")
+    manual_parser.add_argument("--event-type", default="", help="无关键词结构化查询的事件类型")
+    manual_parser.add_argument("--is-high-value", default="", help="无关键词结构化查询是否高价值：true/false")
     manual_parser.add_argument("--dry-run", action="store_true")
-    manual_parser.add_argument("--no-feishu", action="store_true")
+    manual_parser.add_argument("--no-delivery", action="store_true", help="\u53ea\u67e5\u8be2\u548c\u8bb0\u5f55\u5386\u53f2\uff0c\u4e0d\u6807\u8bb0\u4e3a\u5df2\u63a8\u9001")
+    manual_parser.add_argument("--stream", action="store_true", help="print progress updates as soon as each stage starts or finishes")
+    manual_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     manual_parser.set_defaults(func=cmd_manual_push)
+
+    list_parser = sub.add_parser(
+        "list-events",
+        help="按时间窗、来源、事件类型等结构化条件拉取普通事件列表",
+    )
+    list_parser.add_argument("--start", default="", help="起始时间，格式 YYYY-MM-DD HH:MM:SS")
+    list_parser.add_argument("--end", default="", help="结束时间，格式 YYYY-MM-DD HH:MM:SS")
+    list_parser.add_argument("--minutes", type=int, default=60, help="未指定 start/end 时使用最近 N 分钟")
+    list_parser.add_argument("--event-source", default="", help="事件来源，模糊匹配")
+    list_parser.add_argument("--event-type", default="", help="事件类型")
+    list_parser.add_argument("--is-high-value", default="", help="是否高价值事件：true/false")
+    list_parser.add_argument("--page-size", type=int, default=100, help="分页大小，最大 100")
+    list_parser.add_argument("--limit", type=int, default=0, help="最多保留多少条；0 表示按接口 total 全量拉取")
+    list_parser.add_argument("--no-delivery", action="store_true", help="只查询和记录历史，不标记为已推送")
+    list_parser.add_argument("--stream", action="store_true", help="print progress updates as soon as each stage starts or finishes")
+    list_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
+    list_parser.set_defaults(func=cmd_list_events)
 
     run_daily_parser = sub.add_parser("run-daily-summary", help="执行一次每日统计")
     run_daily_parser.add_argument("--force", action="store_true")
     run_daily_parser.add_argument("--dry-run", action="store_true")
     run_daily_parser.add_argument("--quiet", action="store_true")
+    run_daily_parser.add_argument("--openclaw-output", action="store_true", help=argparse.SUPPRESS)
     run_daily_parser.set_defaults(func=cmd_run_daily)
 
     key_parser = sub.add_parser("set-api-key", help="保存 deepseekdata API key 到运行时配置")
@@ -1750,31 +2577,20 @@ def build_parser() -> argparse.ArgumentParser:
     active_group = configure_parser.add_mutually_exclusive_group()
     active_group.add_argument("--active", action="store_true", help="开启运行时推送")
     active_group.add_argument("--inactive", action="store_true", help="关闭运行时推送")
-    configure_parser.add_argument("--keywords", default=None, help="多个关键词用逗号、顿号、分号或斜杠分隔；最多 3 个")
+    configure_parser.add_argument("--keywords", default=None, help="多个关键词用逗号、顿号、分号或斜杠分隔；传空字符串表示无关键词")
+    configure_parser.add_argument("--event-source", default=None, help="无关键词结构化查询的事件来源，模糊匹配")
+    configure_parser.add_argument("--event-type", default=None, help="无关键词结构化查询的事件类型")
+    configure_parser.add_argument("--is-high-value", default=None, help="无关键词结构化查询是否高价值：true/false")
     configure_parser.add_argument("--schedule", default=None, help=f"可选：{schedule_options_text()}")
     configure_parser.add_argument("--page-size", type=int, default=None)
     configure_parser.add_argument("--daily-summary-time", default=None)
+    configure_parser.add_argument(
+        "--filter-observability",
+        default=None,
+        choices=sorted(FILTER_OBSERVABILITY_OPTIONS),
+        help="过滤观测文件写入级别：off 不写入，metrics 只写聚合，debug 写候选链路",
+    )
     configure_parser.set_defaults(func=cmd_configure)
-
-    feishu_target_parser = sub.add_parser("set-feishu-target", help="保存飞书自建应用接收目标")
-    feishu_target_parser.add_argument("--receive-id", required=True)
-    feishu_target_parser.add_argument(
-        "--receive-id-type",
-        default="chat_id",
-        help=f"可选：{feishu_receive_id_type_options_text()}",
-    )
-    feishu_target_parser.set_defaults(func=cmd_set_feishu_target)
-
-    feishu_webhook_parser = sub.add_parser("set-feishu-webhook", help="保存飞书 Webhook URL")
-    webhook_source = feishu_webhook_parser.add_mutually_exclusive_group(required=True)
-    webhook_source.add_argument("--url", help="Webhook URL；传 '-' 表示从 stdin 读取")
-    webhook_source.add_argument("--url-file", help="从本地文件读取 Webhook URL")
-    feishu_webhook_parser.add_argument(
-        "--append",
-        action="store_true",
-        help="追加到现有 Webhook 列表，而不是替换",
-    )
-    feishu_webhook_parser.set_defaults(func=cmd_set_feishu_webhook)
 
     install = sub.add_parser("install-schedule", help="安装系统定时任务")
     install.add_argument("--task-name", default="")
@@ -1786,6 +2602,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = sub.add_parser("status", help="查看运行时状态")
     status_parser.set_defaults(func=cmd_status)
+
+    metrics_parser = sub.add_parser("metrics-summary", help="查看规则过滤观测指标")
+    metrics_parser.add_argument("--hours", type=int, default=24)
+    metrics_parser.add_argument("--days", type=int, default=0)
+    metrics_parser.add_argument("--limit-reasons", type=int, default=20)
+    metrics_parser.set_defaults(func=cmd_metrics_summary)
+
+    candidates_parser = sub.add_parser("filter-candidates", help="查看规则过滤 debug 候选链路")
+    candidates_parser.add_argument("--hours", type=int, default=24)
+    candidates_parser.add_argument("--days", type=int, default=0)
+    candidates_parser.add_argument("--keyword", default="")
+    candidates_parser.add_argument("--limit-batches", type=int, default=10)
+    candidates_parser.add_argument("--limit-candidates", type=int, default=200)
+    candidates_parser.set_defaults(func=cmd_filter_candidates)
+
+    clear_observability_parser = sub.add_parser("clear-filter-observability", help="清理本地过滤观测文件")
+    clear_observability_parser.set_defaults(func=cmd_clear_filter_observability)
+
+    detail_parser = sub.add_parser(
+        "detail-from-ref",
+        help="从最近推送历史中解析用户问法，并调用 deepseekdata 获取事件详情",
+    )
+    detail_parser.add_argument("--query", required=True, help="用户原始问句，例如：第3条详细看看")
+    detail_parser.set_defaults(func=cmd_detail_from_ref)
 
     run_loop_parser = sub.add_parser("run-loop", help="在当前进程中循环运行")
     run_loop_parser.add_argument("--force", action="store_true")
@@ -1813,10 +2653,11 @@ def main() -> int:
     try:
         return int(args.func(args))
     except Exception as exc:  # noqa: BLE001
-        persist_last_error(str(exc))
+        detail = redact_sensitive_text(exc)
+        persist_last_error(detail)
         print(
             json.dumps(
-                {"status": "error", "detail": str(exc)},
+                {"status": "error", "detail": detail},
                 ensure_ascii=False,
                 indent=2,
             )

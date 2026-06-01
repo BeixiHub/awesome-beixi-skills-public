@@ -1,27 +1,45 @@
 """
-事件语义检索工具
+事件查询工具
 - search_events(keyword, minutes, ...): 批量检索事件摘要
 - get_event_detail(keyword, event_id): 获取单个事件详情
+- list_events(...): 按结构化条件分页拉取普通事件列表
 
-底层直连 deepseekdata 语义事件检索 API。
+底层直连 deepseekdata / ReportServer 事件查询 API。
 """
 
+from __future__ import annotations
+
 import json
+import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import re
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from rule_relevance import apply_rule_filter
 from runtime_config import resolve_event_api_key
 
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
 MAX_KEYWORDS = 3
-EVENT_LIST_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
+SEMANTIC_EVENT_LIST_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
+STRUCTURED_EVENT_LIST_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/list"
+EVENT_LIST_URL = SEMANTIC_EVENT_LIST_URL
 DEFAULT_TIMEOUT = 60
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_ERROR_BODY_BYTES = 4096
+DEFAULT_MIN_VERIFICATION_COMPREHENSIVE_SCORE = 0.0
+DEFAULT_MIN_SEMANTIC_SCORE = 0.35
+SCRIPT_DIR = Path(__file__).resolve().parent
+STATE_DIR = SCRIPT_DIR / "state"
+FILTER_OBSERVABILITY_ENV = "EVENT_INTEL_FILTER_OBSERVABILITY"
+RULE_FILTER_METRICS_PATH = STATE_DIR / "rule_filter_metrics.jsonl"
+RULE_FILTER_REJECTIONS_PATH = STATE_DIR / "rule_filter_rejections.jsonl"
+RULE_FILTER_CANDIDATES_PATH = STATE_DIR / "rule_filter_candidates.jsonl"
 
 
 def reset_event_api_client() -> None:
@@ -29,7 +47,7 @@ def reset_event_api_client() -> None:
     return None
 
 
-def _request(params: dict) -> dict:
+def _request(params: dict, *, url: str = SEMANTIC_EVENT_LIST_URL) -> dict:
     api_key = resolve_event_api_key()
     if not api_key:
         raise RuntimeError(
@@ -38,7 +56,7 @@ def _request(params: dict) -> dict:
         )
 
     request = Request(
-        f"{EVENT_LIST_URL}?{urlencode(params)}",
+        f"{url}?{urlencode(params)}",
         headers={"X-API-Key": api_key, "tenant-id": "1"},
         method="GET",
     )
@@ -70,6 +88,14 @@ def _request(params: dict) -> dict:
     return raw["data"]
 
 
+def _semantic_request(params: dict) -> dict:
+    return _request(params, url=SEMANTIC_EVENT_LIST_URL)
+
+
+def _structured_request(params: dict) -> dict:
+    return _request(params, url=STRUCTURED_EVENT_LIST_URL)
+
+
 def _safe_get(d: dict, *keys, default=None):
     """安全地按路径取嵌套字典的值"""
     for k in keys:
@@ -79,6 +105,30 @@ def _safe_get(d: dict, *keys, default=None):
         if d is None:
             return default
     return d
+
+
+def _score(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _passes_score_filters(
+    item: dict,
+    *,
+    min_verification_comprehensive_score: float | None,
+    min_semantic_score: float | None,
+) -> bool:
+    if min_verification_comprehensive_score is not None:
+        score = _score(item.get("verificationComprehensiveScore"))
+        if score is None or score < min_verification_comprehensive_score:
+            return False
+    if min_semantic_score is not None:
+        score = _score(item.get("semanticScore"))
+        if score is None or score < min_semantic_score:
+            return False
+    return True
 
 
 _BJT = timezone(timedelta(hours=8))
@@ -102,6 +152,275 @@ def _format_ts(ts) -> str | None:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts / 1000, tz=_BJT).strftime(DATE_FMT)
+
+
+def _safe_format_ts(ts) -> str | None:
+    try:
+        return _format_ts(ts)
+    except (TypeError, ValueError, OSError):
+        return str(ts) if ts is not None else None
+
+
+def _event_publish_date(value: Any) -> str | None:
+    if isinstance(value, (int, float)):
+        return _safe_format_ts(value)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _event_title(item: dict) -> str | None:
+    return item.get("compliantTitle") or item.get("eventTitle") or item.get("title")
+
+
+def _project_event_summary(
+    item: dict,
+    *,
+    rule_result: dict | None = None,
+) -> dict:
+    meta = item.get("analysisMetadata", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    core_logic = meta.get("core_logic_output", {})
+    if not isinstance(core_logic, dict):
+        core_logic = {}
+    ic_report = meta.get("ic_report_v10_output", {})
+    if not isinstance(ic_report, dict):
+        ic_report = {}
+
+    projected = {
+        "eventId": item.get("eventId"),
+        "compliantTitle": _event_title(item),
+        "eventTitle": item.get("eventTitle"),
+        "eventType": item.get("eventType"),
+        "eventSource": item.get("eventSource"),
+        "eventPublishDate": _event_publish_date(item.get("eventPublishDate")),
+        "verificationComprehensiveScore": item.get("verificationComprehensiveScore"),
+        "semanticScore": item.get("semanticScore"),
+        "isHighValue": item.get("isHighValue"),
+        "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
+        "original_summary": _strip_report_prefix(
+            core_logic.get("original_summary") or item.get("oneSentenceSummary")
+        ),
+        "summary": _strip_report_prefix(ic_report.get("summary") or item.get("oneSentenceSummary")),
+    }
+    if rule_result is not None:
+        projected.update(
+            {
+                "ruleFilterPassed": rule_result["ruleFilterPassed"],
+                "ruleFilterReason": rule_result["ruleFilterReason"],
+                "matchedIncludeTerms": rule_result["matchedIncludeTerms"],
+                "matchedExcludeTerms": rule_result["matchedExcludeTerms"],
+            }
+        )
+    return projected
+
+
+def _project_event_detail(item: dict) -> dict:
+    meta = item.get("analysisMetadata", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    core_logic = meta.get("core_logic_output", {})
+    if not isinstance(core_logic, dict):
+        core_logic = {}
+    ic_report = meta.get("ic_report_v10_output", {})
+    if not isinstance(ic_report, dict):
+        ic_report = {}
+    logic_validation = meta.get("logic_validation_output", {})
+    if not isinstance(logic_validation, dict):
+        logic_validation = {}
+    logic_library = meta.get("logic_library_output", {})
+    if not isinstance(logic_library, dict):
+        logic_library = {}
+
+    targets_summary = []
+    for t in item.get("investmentTargetsSummary", []) or []:
+        if not isinstance(t, dict):
+            continue
+        targets_summary.append(
+            {
+                "relevance": t.get("relevance"),
+                "target_code": t.get("target_code"),
+                "target_name": t.get("target_name"),
+                "research_opinion": t.get("research_opinion"),
+            }
+        )
+
+    return {
+        "compliantTitle": _event_title(item),
+        "eventTitle": item.get("eventTitle"),
+        "eventType": item.get("eventType"),
+        "eventSource": item.get("eventSource"),
+        "eventPublishDate": _event_publish_date(item.get("eventPublishDate")),
+        "oneSentenceSummary": item.get("oneSentenceSummary"),
+        "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
+        "original_summary": _strip_report_prefix(
+            core_logic.get("original_summary") or item.get("oneSentenceSummary")
+        ),
+        "summary": _strip_report_prefix(ic_report.get("summary") or item.get("oneSentenceSummary")),
+        "investmentTargetsSummary": targets_summary,
+        "investmentLogic": item.get("investmentLogic"),
+        "overallReasoningChain": item.get("overallReasoningChain"),
+        "keyRisks": item.get("keyRisks"),
+        "signalCategory": item.get("signalCategory"),
+        "formatted_tree": ic_report.get("formatted_tree"),
+        "transmission_logic": ic_report.get("transmission_logic"),
+        "logic_library_output": logic_library,
+        "historical_cases_analysis": logic_validation.get("historical_cases_analysis"),
+        "analysisMetadata": meta,
+    }
+
+
+def _append_jsonl(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        return
+
+
+def _filter_observability_mode() -> str:
+    raw = os.getenv(FILTER_OBSERVABILITY_ENV, "off").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return "metrics"
+    if raw in {"metrics", "debug", "off"}:
+        return raw
+    return "off"
+
+
+def _trace_key(item: dict) -> str:
+    event_id = str(item.get("eventId", "") or "").strip()
+    if event_id:
+        return f"id:{event_id}"
+    title = str(item.get("title") or item.get("compliantTitle") or item.get("eventTitle") or "")
+    return f"fallback:{title}:{item.get('eventPublishDate')}"
+
+
+def _candidate_trace_record(
+    *,
+    keyword: str,
+    item: dict,
+    passes_score_filter: bool,
+    rule_result: dict | None = None,
+) -> dict:
+    return {
+        "traceKey": _trace_key(item),
+        "keyword": keyword,
+        "eventId": item.get("eventId"),
+        "title": item.get("title") or item.get("compliantTitle") or item.get("eventTitle"),
+        "eventPublishDate": _safe_format_ts(item.get("eventPublishDate")),
+        "eventSource": item.get("eventSource"),
+        "signalCategory": item.get("signalCategory"),
+        "verificationComprehensiveScore": item.get("verificationComprehensiveScore"),
+        "semanticScore": item.get("semanticScore"),
+        "passesScoreFilter": passes_score_filter,
+        "ruleFilterPassed": None if rule_result is None else rule_result.get("ruleFilterPassed"),
+        "ruleFilterReason": "" if rule_result is None else rule_result.get("ruleFilterReason", ""),
+        "matchedIncludeTerms": [] if rule_result is None else rule_result.get("matchedIncludeTerms", []),
+        "matchedExcludeTerms": [] if rule_result is None else rule_result.get("matchedExcludeTerms", []),
+        "returned": False,
+    }
+
+
+def _rule_rejection_record(
+    *,
+    keyword: str,
+    minutes: int,
+    item: dict,
+    rule_result: dict,
+    min_verification_comprehensive_score: float | None,
+    min_semantic_score: float | None,
+) -> dict:
+    return {
+        "ts": datetime.now(tz=_BJT).isoformat(),
+        "keyword": keyword,
+        "window_minutes": minutes,
+        "eventId": item.get("eventId"),
+        "title": item.get("title") or item.get("compliantTitle") or item.get("eventTitle"),
+        "eventPublishDate": _safe_format_ts(item.get("eventPublishDate")),
+        "eventSource": item.get("eventSource"),
+        "signalCategory": item.get("signalCategory"),
+        "verificationComprehensiveScore": item.get("verificationComprehensiveScore"),
+        "semanticScore": item.get("semanticScore"),
+        "min_verification_comprehensive_score": min_verification_comprehensive_score,
+        "min_semantic_score": min_semantic_score,
+        "ruleFilterPassed": rule_result.get("ruleFilterPassed"),
+        "ruleFilterReason": rule_result.get("ruleFilterReason"),
+        "matchedIncludeTerms": rule_result.get("matchedIncludeTerms", []),
+        "matchedExcludeTerms": rule_result.get("matchedExcludeTerms", []),
+    }
+
+
+def _record_filter_metrics(
+    *,
+    keyword: str,
+    minutes: int,
+    requested_page_size: int,
+    fetch_size: int,
+    api_total: int,
+    fetched_count: int,
+    score_filtered_count: int,
+    score_removed_count: int,
+    rule_filtered_count: int,
+    rule_removed_count: int,
+    returned_count: int,
+    rule_reason_counts: Counter,
+    min_verification_comprehensive_score: float | None,
+    min_semantic_score: float | None,
+) -> None:
+    if _filter_observability_mode() not in {"metrics", "debug"}:
+        return
+    _append_jsonl(
+        RULE_FILTER_METRICS_PATH,
+        {
+            "ts": datetime.now(tz=_BJT).isoformat(),
+            "keyword": keyword,
+            "window_minutes": minutes,
+            "requested_page_size": requested_page_size,
+            "fetch_size": fetch_size,
+            "api_total": api_total,
+            "fetched_count": fetched_count,
+            "score_filtered_count": score_filtered_count,
+            "score_removed_count": score_removed_count,
+            "rule_filtered_count": rule_filtered_count,
+            "rule_removed_count": rule_removed_count,
+            "returned_count": returned_count,
+            "ruleFilterReason_counts": dict(rule_reason_counts),
+            "min_verification_comprehensive_score": min_verification_comprehensive_score,
+            "min_semantic_score": min_semantic_score,
+        },
+    )
+
+
+def _record_candidate_trace(
+    *,
+    keyword: str,
+    minutes: int,
+    requested_page_size: int,
+    fetch_size: int,
+    candidates: list[dict],
+    min_verification_comprehensive_score: float | None,
+    min_semantic_score: float | None,
+) -> None:
+    if _filter_observability_mode() != "debug":
+        return
+    _append_jsonl(
+        RULE_FILTER_CANDIDATES_PATH,
+        {
+            "ts": datetime.now(tz=_BJT).isoformat(),
+            "observabilityKind": "filter-candidate-trace",
+            "debugOnly": True,
+            "keyword": keyword,
+            "window_minutes": minutes,
+            "requested_page_size": requested_page_size,
+            "fetch_size": fetch_size,
+            "min_verification_comprehensive_score": min_verification_comprehensive_score,
+            "min_semantic_score": min_semantic_score,
+            "candidates": candidates,
+        },
+    )
 
 
 def _signal_level(item: dict) -> str:
@@ -140,6 +459,8 @@ def search_events(
     keyword: str,
     minutes: int = 60,
     page_size: int = 10,
+    min_verification_comprehensive_score: float | None = DEFAULT_MIN_VERIFICATION_COMPREHENSIVE_SCORE,
+    min_semantic_score: float | None = DEFAULT_MIN_SEMANTIC_SCORE,
 ) -> dict:
     """
     按时间范围检索事件，返回精简摘要列表。
@@ -156,37 +477,224 @@ def search_events(
     now = datetime.now(tz=_BJT)
     start = now - timedelta(minutes=minutes)
 
+    fetch_size = page_size
+    if min_verification_comprehensive_score is not None or min_semantic_score is not None:
+        fetch_size = min(30, max(page_size, page_size * 3))
+
     params = {
         "keyword": keyword,
         "eventPublishDateStart": start.strftime(DATE_FMT),
         "eventPublishDateEnd": now.strftime(DATE_FMT),
         "pageNo": 1,
-        "pageSize": page_size,
+        "pageSize": fetch_size,
     }
 
-    data = _request(params)
+    data = _semantic_request(params)
     events = []
-    for item in data.get("list", []):
-        meta = item.get("analysisMetadata", {})
-        core_logic = meta.get("core_logic_output", {})
-        ic_report = meta.get("ic_report_v10_output", {})
+    items = data.get("list", [])
+    score_filtered_count = 0
+    score_removed_count = 0
+    rule_filtered_count = 0
+    rule_removed_count = 0
+    rule_reason_counts: Counter = Counter()
+    observability_mode = _filter_observability_mode()
+    record_debug_trace = observability_mode == "debug"
+    candidate_trace: list[dict] = []
 
-        events.append({
-            "eventId": item.get("eventId"),
-            "compliantTitle": item.get("compliantTitle"),
-            "eventPublishDate": _format_ts(item.get("eventPublishDate")),
-            "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
-            "original_summary": _strip_report_prefix(core_logic.get("original_summary")),
-            "summary": _strip_report_prefix(ic_report.get("summary")),
-        })
+    for item in items:
+        if not _passes_score_filters(
+            item,
+            min_verification_comprehensive_score=min_verification_comprehensive_score,
+            min_semantic_score=min_semantic_score,
+        ):
+            score_removed_count += 1
+            if record_debug_trace:
+                candidate_trace.append(
+                    _candidate_trace_record(
+                        keyword=keyword,
+                        item=item,
+                        passes_score_filter=False,
+                    )
+                )
+            continue
+        score_filtered_count += 1
+        rule_result = apply_rule_filter(keyword, item)
+        rule_reason_counts[rule_result["ruleFilterReason"]] += 1
+        if not rule_result["ruleFilterPassed"]:
+            rule_removed_count += 1
+            if record_debug_trace:
+                candidate_trace.append(
+                    _candidate_trace_record(
+                        keyword=keyword,
+                        item=item,
+                        passes_score_filter=True,
+                        rule_result=rule_result,
+                    )
+                )
+                _append_jsonl(
+                    RULE_FILTER_REJECTIONS_PATH,
+                    _rule_rejection_record(
+                        keyword=keyword,
+                        minutes=minutes,
+                        item=item,
+                        rule_result=rule_result,
+                        min_verification_comprehensive_score=min_verification_comprehensive_score,
+                        min_semantic_score=min_semantic_score,
+                    ),
+                )
+            continue
+        rule_filtered_count += 1
+        if record_debug_trace:
+            candidate_trace.append(
+                _candidate_trace_record(
+                    keyword=keyword,
+                    item=item,
+                    passes_score_filter=True,
+                    rule_result=rule_result,
+                )
+            )
+        events.append(_project_event_summary(item, rule_result=rule_result))
 
     total = data.get("total", 0)
 
     events.sort(key=lambda e: e.get("eventPublishDate") or "", reverse=True)
     events.sort(key=lambda e: _LEVEL_PRIORITY.get(e.get("signalLevel"), 99))
     sorted_events = events
+    returned_events = sorted_events[:page_size]
+    if candidate_trace:
+        returned_keys = {_trace_key(item) for item in returned_events}
+        for candidate in candidate_trace:
+            candidate["returned"] = candidate.get("traceKey") in returned_keys
 
-    return {"total": total, "events": sorted_events[:page_size]}
+    _record_filter_metrics(
+        keyword=keyword,
+        minutes=minutes,
+        requested_page_size=page_size,
+        fetch_size=fetch_size,
+        api_total=int(total or 0),
+        fetched_count=len(items),
+        score_filtered_count=score_filtered_count,
+        score_removed_count=score_removed_count,
+        rule_filtered_count=rule_filtered_count,
+        rule_removed_count=rule_removed_count,
+        returned_count=len(returned_events),
+        rule_reason_counts=rule_reason_counts,
+        min_verification_comprehensive_score=min_verification_comprehensive_score,
+        min_semantic_score=min_semantic_score,
+    )
+    _record_candidate_trace(
+        keyword=keyword,
+        minutes=minutes,
+        requested_page_size=page_size,
+        fetch_size=fetch_size,
+        candidates=candidate_trace,
+        min_verification_comprehensive_score=min_verification_comprehensive_score,
+        min_semantic_score=min_semantic_score,
+    )
+
+    return {"total": total, "events": returned_events}
+
+
+def _normalize_bool_param(value: bool | str | int | None) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "是", "高价值"}:
+        return "true"
+    if text in {"0", "false", "no", "n", "off", "否", "非高价值"}:
+        return "false"
+    return str(value).strip()
+
+
+def list_events(
+    *,
+    event_publish_date_start: str | datetime,
+    event_publish_date_end: str | datetime,
+    event_source: str | None = None,
+    event_type: str | None = None,
+    is_high_value: bool | str | int | None = None,
+    page_size: int = 100,
+    max_events: int | None = None,
+) -> dict:
+    """
+    按结构化条件从普通事件列表接口分页拉取事件。
+
+    适用于无 keyword 的全量/补数/历史列表场景；不要用于语义相关性检索。
+    下游应使用 eventId 去重。
+    """
+    def fmt(value: str | datetime) -> str:
+        if isinstance(value, datetime):
+            return value.astimezone(_BJT).strftime(DATE_FMT)
+        return str(value).strip()
+
+    params: dict[str, Any] = {
+        "eventPublishDateStart": fmt(event_publish_date_start),
+        "eventPublishDateEnd": fmt(event_publish_date_end),
+        "pageNo": 1,
+        "pageSize": max(1, min(int(page_size or 100), 100)),
+    }
+    if event_source:
+        params["eventSource"] = str(event_source).strip()
+    if event_type:
+        params["eventType"] = str(event_type).strip()
+    high_value = _normalize_bool_param(is_high_value)
+    if high_value is not None:
+        params["isHighValue"] = high_value
+
+    events_by_id: dict[str, dict] = {}
+    fallback_index = 0
+    total = 0
+    fetched = 0
+    page_no = 1
+    while True:
+        params["pageNo"] = page_no
+        data = _structured_request(params)
+        items = data.get("list", [])
+        if not isinstance(items, list):
+            items = []
+        total = int(data.get("total", 0) or 0)
+        fetched += len(items)
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            event_id = str(item.get("eventId", "") or "").strip()
+            if not event_id:
+                fallback_index += 1
+                event_id = (
+                    f"fallback:{item.get('eventPublishDate')}:"
+                    f"{_event_title(item)}:{fallback_index}"
+                )
+            if event_id not in events_by_id:
+                events_by_id[event_id] = _project_event_summary(item)
+        if max_events is not None and len(events_by_id) >= max(0, int(max_events)):
+            break
+        if fetched >= total or len(items) < params["pageSize"]:
+            break
+        page_no += 1
+
+    events = list(events_by_id.values())
+    events.sort(key=lambda item: str(item.get("eventPublishDate", "") or ""), reverse=True)
+    events.sort(key=lambda item: _LEVEL_PRIORITY.get(str(item.get("signalLevel", "") or ""), 99))
+    if max_events is not None:
+        events = events[: max(0, int(max_events))]
+
+    return {
+        "total": total,
+        "deduped_total": len(events_by_id),
+        "fetched": fetched,
+        "pages": page_no,
+        "query": {
+            "eventPublishDateStart": params["eventPublishDateStart"],
+            "eventPublishDateEnd": params["eventPublishDateEnd"],
+            "eventSource": params.get("eventSource", ""),
+            "eventType": params.get("eventType", ""),
+            "isHighValue": params.get("isHighValue", ""),
+        },
+        "events": events,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -210,45 +718,70 @@ def get_event_detail(keyword: str, event_id: str) -> dict | None:
         "pageSize": 1,
     }
 
-    data = _request(params)
+    data = _semantic_request(params)
     items = data.get("list", [])
     if not items:
         return None
 
-    item = items[0]
-    meta = item.get("analysisMetadata", {})
-    core_logic = meta.get("core_logic_output", {})
-    ic_report = meta.get("ic_report_v10_output", {})
-    logic_validation = meta.get("logic_validation_output", {})
-    logic_library = meta.get("logic_library_output", {})
+    return _project_event_detail(items[0])
 
-    targets_summary = []
-    for t in item.get("investmentTargetsSummary", []):
-        targets_summary.append(
-            {
-                "relevance": t.get("relevance"),
-                "target_code": t.get("target_code"),
-                "target_name": t.get("target_name"),
-                "research_opinion": t.get("research_opinion"),
-            }
-        )
 
-    return {
-        "compliantTitle": item.get("compliantTitle"),
-        "eventPublishDate": _format_ts(item.get("eventPublishDate")),
-        "signalLevel": _safe_get(core_logic, "signal_hint", "level"),
-        "original_summary": _strip_report_prefix(core_logic.get("original_summary")),
-        "summary": _strip_report_prefix(ic_report.get("summary")),
-        "investmentTargetsSummary": targets_summary,
-        "investmentLogic": item.get("investmentLogic"),
-        "overallReasoningChain": item.get("overallReasoningChain"),
-        "keyRisks": item.get("keyRisks"),
-        "signalCategory": item.get("signalCategory"),
-        "formatted_tree": ic_report.get("formatted_tree"),
-        "transmission_logic": ic_report.get("transmission_logic"),
-        "logic_library_output": logic_library,
-        "historical_cases_analysis": logic_validation.get("historical_cases_analysis"),
+def get_event_detail_from_structured_list(
+    *,
+    event_id: str,
+    event_publish_date_start: str | datetime | None = None,
+    event_publish_date_end: str | datetime | None = None,
+    event_source: str | None = None,
+    event_type: str | None = None,
+    is_high_value: bool | str | int | None = None,
+) -> dict | None:
+    """
+    从普通事件列表接口按 eventId 查找详情。
+
+    ReportServer 列表接口返回完整事件分析字段；如后端不支持 eventId 参数，
+    可配合时间窗/来源/类型缩小范围后在本地按 eventId 去重匹配。
+    """
+    if not str(event_id or "").strip():
+        return None
+    end = event_publish_date_end or datetime.now(tz=_BJT)
+    start = event_publish_date_start or (datetime.now(tz=_BJT) - timedelta(days=7))
+
+    def fmt(value: str | datetime) -> str:
+        if isinstance(value, datetime):
+            return value.astimezone(_BJT).strftime(DATE_FMT)
+        return str(value).strip()
+
+    params: dict[str, Any] = {
+        "eventId": str(event_id).strip(),
+        "eventPublishDateStart": fmt(start),
+        "eventPublishDateEnd": fmt(end),
+        "pageNo": 1,
+        "pageSize": 100,
     }
+    if event_source:
+        params["eventSource"] = str(event_source).strip()
+    if event_type:
+        params["eventType"] = str(event_type).strip()
+    high_value = _normalize_bool_param(is_high_value)
+    if high_value is not None:
+        params["isHighValue"] = high_value
+
+    fetched = 0
+    total = 0
+    while True:
+        data = _structured_request(params)
+        items = data.get("list", [])
+        if not isinstance(items, list):
+            items = []
+        total = int(data.get("total", 0) or 0)
+        fetched += len(items)
+        for item in items:
+            if isinstance(item, dict) and str(item.get("eventId", "") or "") == str(event_id):
+                return _project_event_detail(item)
+        if fetched >= total or len(items) < params["pageSize"]:
+            break
+        params["pageNo"] += 1
+    return None
 
 
 # ──────────────────────────────────────────────
@@ -279,7 +812,7 @@ def _fetch_summary_window(
         "pageSize": batch_size,
     }
 
-    data = _request(params)
+    data = _semantic_request(params)
     total = int(data.get("total", 0) or 0)
     levels_by_id: dict[str, str] = {}
     fallback_index = 0
@@ -302,7 +835,7 @@ def _fetch_summary_window(
     page = 2
     while fetched < total:
         params["pageNo"] = page
-        data = _request(params)
+        data = _semantic_request(params)
         items = data.get("list", [])
         add_items(items)
         fetched += len(items)
