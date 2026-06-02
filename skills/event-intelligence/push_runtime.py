@@ -315,6 +315,15 @@ def schedule_lookback_minutes(schedule: str) -> int:
     return int(preset["lookback_minutes"])
 
 
+def scheduled_push_lookback_minutes(schedule: str, run_time: datetime | None = None) -> int:
+    schedule = validate_schedule(schedule)
+    lookback_minutes = schedule_lookback_minutes(schedule)
+    current_time = (run_time or now_bjt()).astimezone(BJT)
+    if schedule == "24h" and lookback_minutes == 24 * 60 and current_time.weekday() == 0:
+        return 3 * 24 * 60
+    return lookback_minutes
+
+
 def schedule_sleep_seconds(schedule: str) -> int:
     schedule = validate_schedule(schedule)
     if not schedule.startswith("daily-"):
@@ -1500,7 +1509,7 @@ def run_once(
     if not has_event_api_key(cfg):
         raise RuntimeError(event_api_key_missing_message())
 
-    lookback_minutes = schedule_lookback_minutes(cfg["schedule"])
+    lookback_minutes = scheduled_push_lookback_minutes(cfg["schedule"])
     page_size = cfg["page_size"]
     keywords = validate_keywords(cfg.get("keywords"), default_to_ai=False)
     keyword_label = keywords_label(keywords)
