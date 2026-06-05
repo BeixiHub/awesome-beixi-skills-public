@@ -1,0 +1,27 @@
+{
+  "name": "openclaw-event-intelligence-tools",
+  "version": "0.1.0",
+  "description": "OpenClaw tool plugin for deepseekdata event intelligence queries, details, summaries, and push configuration.",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check index.js && env PYTHONPYCACHEPREFIX=/private/tmp/event-intelligence-tool-pycache python3 -m py_compile scripts/push_runtime.py scripts/event_query.py scripts/runtime_config.py scripts/rule_relevance.py scripts/tool_bridge.py"
+  },
+  "openclaw": {
+    "entry": "./index.js",
+    "tools": [
+      "event_intelligence_search_recent",
+      "event_intelligence_list_events",
+      "event_intelligence_get_detail",
+      "event_intelligence_daily_summary",
+      "event_intelligence_run_once",
+      "event_intelligence_configure_push",
+      "event_intelligence_status",
+      "event_intelligence_filter_metrics"
+    ]
+  }
+}

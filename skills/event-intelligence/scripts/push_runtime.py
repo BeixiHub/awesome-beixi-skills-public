@@ -709,6 +709,111 @@ def compact_structured_event(item: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+KEYWORD_FALLBACK_ALIASES: dict[str, tuple[str, ...]] = {
+    "ai": ("ai", "aigc", "人工智能", "大模型", "算力", "智能体", "模型"),
+}
+
+
+def _fallback_terms_for_keyword(keyword: str) -> list[str]:
+    cleaned = str(keyword or "").strip()
+    if not cleaned:
+        return []
+    terms = [cleaned]
+    aliases = KEYWORD_FALLBACK_ALIASES.get(cleaned.casefold(), ())
+    for alias in aliases:
+        if alias not in terms:
+            terms.append(alias)
+    return terms
+
+
+def _fallback_match_text(event: dict[str, Any]) -> str:
+    parts = [
+        event.get("compliantTitle"),
+        event.get("eventTitle"),
+        event.get("original_summary"),
+        event.get("summary"),
+        event.get("eventType"),
+        event.get("eventSource"),
+    ]
+    return "\n".join(str(part or "") for part in parts if part).casefold()
+
+
+def _structured_keyword_fallback(
+    *,
+    keywords: list[str],
+    minutes: int,
+    page_size: int,
+    event_source: str = "",
+    event_type: str = "",
+    is_high_value: Any = None,
+) -> dict[str, Any]:
+    end_dt = now_bjt()
+    start_dt = end_dt - timedelta(minutes=max(1, int(minutes or 60)))
+    fallback_page_size = max(1, min(int(page_size or 10), 20))
+    fallback_fetch_limit = max(fallback_page_size, min(100, fallback_page_size * 5))
+    result = list_events(
+        event_publish_date_start=start_dt,
+        event_publish_date_end=end_dt,
+        event_source=event_source or None,
+        event_type=event_type or None,
+        is_high_value=parse_optional_bool(is_high_value),
+        page_size=fallback_page_size,
+        max_events=fallback_fetch_limit,
+    )
+
+    matched_events: dict[str, dict[str, Any]] = {}
+    totals_by_keyword = {keyword: 0 for keyword in keywords}
+    for item in result.get("events", []):
+        if not isinstance(item, dict):
+            continue
+        event = compact_structured_event(item)
+        text = _fallback_match_text(event)
+        matched_keywords = []
+        for keyword in keywords:
+            terms = _fallback_terms_for_keyword(keyword)
+            if any(term.casefold() in text for term in terms):
+                matched_keywords.append(keyword)
+        if not matched_keywords:
+            continue
+
+        event["matched_keywords"] = matched_keywords
+        event["fallback_match"] = "structured_list_keyword_text"
+        event_id = str(event.get("eventId", "") or "")
+        if not event_id:
+            event_id = f"fallback::{event.get('compliantTitle', '')}::{event.get('eventPublishDate', '')}"
+        existing = matched_events.get(event_id)
+        if existing is None:
+            matched_events[event_id] = event
+        else:
+            existing_matched = existing.setdefault("matched_keywords", [])
+            for keyword in matched_keywords:
+                if keyword not in existing_matched:
+                    existing_matched.append(keyword)
+
+        for keyword in matched_keywords:
+            totals_by_keyword[keyword] = totals_by_keyword.get(keyword, 0) + 1
+
+    events = list(matched_events.values())
+    events.sort(key=lambda item: str(item.get("eventPublishDate", "") or ""), reverse=True)
+    events.sort(key=lambda item: SIGNAL_LEVEL_PRIORITY.get(str(item.get("signalLevel", "") or ""), 99))
+    events = events[:page_size]
+    return {
+        "keywords": keywords,
+        "total": len(events),
+        "sum_keyword_total": sum(totals_by_keyword.values()),
+        "totals_by_keyword": totals_by_keyword,
+        "deduped_total": int(result.get("deduped_total", 0) or 0),
+        "fetched": int(result.get("fetched", 0) or 0),
+        "query": result.get("query", {}),
+        "events": events,
+    }
+
+
+def _should_fallback_semantic_error(exc: RuntimeError) -> bool:
+    detail = str(exc or "")
+    return "deepseekdata API 错误" in detail and "系统异常" in detail
+
+
 def query_events_unified(
     *,
     keywords: list[str],
@@ -726,17 +831,37 @@ def query_events_unified(
     resolved_page_size = max(1, int(page_size or 10))
 
     if cleaned_keywords:
-        result = search_events_for_keywords(
-            keywords=cleaned_keywords,
-            minutes=minutes,
-            page_size=resolved_page_size,
-            min_verification_comprehensive_score=cfg.get("min_verification_comprehensive_score"),
-            min_semantic_score=cfg.get("min_semantic_score"),
-        )
-        raw_events = result.get("events", [])
-        return {
-            "mode": "keyword",
-            "source": "semantic_event_list",
+        fallback_reason = ""
+        try:
+            result = search_events_for_keywords(
+                keywords=cleaned_keywords,
+                minutes=minutes,
+                page_size=resolved_page_size,
+                min_verification_comprehensive_score=cfg.get("min_verification_comprehensive_score"),
+                min_semantic_score=cfg.get("min_semantic_score"),
+            )
+            raw_events = result.get("events", [])
+            source = "semantic_event_list"
+            mode = "keyword"
+        except RuntimeError as exc:
+            if not _should_fallback_semantic_error(exc):
+                raise
+            fallback_reason = redact_sensitive_text(exc)
+            result = _structured_keyword_fallback(
+                keywords=cleaned_keywords,
+                minutes=minutes,
+                page_size=resolved_page_size,
+                event_source=event_source,
+                event_type=event_type,
+                is_high_value=is_high_value,
+            )
+            raw_events = result.get("events", [])
+            source = "reportserver_event_analysis_list_keyword_fallback"
+            mode = "keyword_fallback"
+
+        response = {
+            "mode": mode,
+            "source": source,
             "keywords": cleaned_keywords,
             "keyword_label": keywords_label(cleaned_keywords),
             "total": int(result.get("total", 0) or 0),
@@ -744,6 +869,19 @@ def query_events_unified(
             "totals_by_keyword": result.get("totals_by_keyword", {}),
             "events": [compact_event(item) for item in raw_events if isinstance(item, dict)],
         }
+        if fallback_reason:
+            response["fallback"] = {
+                "from": "semantic_event_list",
+                "to": "reportserver_event_analysis_list",
+                "reason": fallback_reason,
+                "match_policy": "keyword text match on platform event title and summaries",
+                "fetched": int(result.get("fetched", 0) or 0),
+                "query": result.get("query", {}),
+            }
+            response["query"] = result.get("query", {})
+            response["fetched"] = int(result.get("fetched", 0) or 0)
+            response["deduped_total"] = int(result.get("deduped_total", 0) or 0)
+        return response
 
     end_dt = end_dt or now_bjt()
     start_dt = start_dt or (end_dt - timedelta(minutes=max(1, int(minutes or 60))))
@@ -753,7 +891,7 @@ def query_events_unified(
         event_source=event_source or None,
         event_type=event_type or None,
         is_high_value=parse_optional_bool(is_high_value),
-        page_size=100,
+        page_size=max(1, min(resolved_page_size, 100)),
         max_events=max_events,
     )
     raw_events = result.get("events", [])
@@ -1067,7 +1205,7 @@ def structured_daily_summary(cfg: dict[str, Any], minutes: int = 1440) -> dict[s
     result = query_events_unified(
         keywords=[],
         minutes=minutes,
-        page_size=100,
+        page_size=20,
         cfg=cfg,
         event_source=cfg.get("event_source", ""),
         event_type=cfg.get("event_type", ""),
@@ -1567,6 +1705,7 @@ def run_once(
             "message": "本次没有发现新的事件，不需要推送。",
             "run_time": run_time,
             "lookback_minutes": lookback_minutes,
+            "fallback": result.get("fallback", {}),
             "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
         }
 
@@ -1614,6 +1753,7 @@ def run_once(
         "lookback_minutes": lookback_minutes,
         "run_time": run_time,
         "last_push_time": batch_time if real_sent else "",
+        "fallback": result.get("fallback", {}),
         "openclaw_announce_text": text if openclaw_output else "",
         "events": indexed_events,
     }
@@ -1700,6 +1840,7 @@ def manual_push(
             "reason": "no_events",
             "message": "没有查询到可推送的事件。",
             "run_time": run_time,
+            "fallback": result.get("fallback", {}),
             "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
             "events": [],
         }
@@ -1754,6 +1895,7 @@ def manual_push(
         "pushed": len(indexed_events),
         "run_time": run_time,
         "last_push_time": batch_time if real_sent else "",
+        "fallback": result.get("fallback", {}),
         "openclaw_announce_text": text if openclaw_output else "",
         "text": text,
         "events": indexed_events,
