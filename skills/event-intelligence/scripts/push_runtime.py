@@ -692,6 +692,38 @@ def parse_optional_bool(value: Any) -> bool | str | None:
     return text
 
 
+def normalize_signal_level(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    aliases = {
+        "S": "S级",
+        "A": "A级",
+        "B": "B级",
+        "C": "C级",
+        "S级": "S级",
+        "A级": "A级",
+        "B级": "B级",
+        "C级": "C级",
+    }
+    normalized = aliases.get(upper, aliases.get(text, text))
+    if normalized not in SIGNAL_LEVEL_PRIORITY:
+        supported = "、".join(SIGNAL_LEVEL_PRIORITY)
+        raise RuntimeError(f"signalLevel 只支持：{supported}。")
+    return normalized
+
+
+def filter_events_by_signal_level(events: list[dict[str, Any]], signal_level: str) -> list[dict[str, Any]]:
+    if not signal_level:
+        return events
+    return [
+        event
+        for event in events
+        if str(event.get("signalLevel", "") or "").strip() == signal_level
+    ]
+
+
 def compact_structured_event(item: dict[str, Any]) -> dict[str, Any]:
     event = compact_event(item)
     for key in ("eventTitle", "eventType", "eventSource", "isHighValue"):
@@ -823,6 +855,7 @@ def query_events_unified(
     event_source: str = "",
     event_type: str = "",
     is_high_value: Any = None,
+    signal_level: str = "",
     start_dt: datetime | None = None,
     end_dt: datetime | None = None,
     max_events: int | None = None,
@@ -891,6 +924,7 @@ def query_events_unified(
         event_source=event_source or None,
         event_type=event_type or None,
         is_high_value=parse_optional_bool(is_high_value),
+        signal_levels=signal_level,
         page_size=max(1, min(resolved_page_size, 100)),
         max_events=max_events,
     )
@@ -971,6 +1005,7 @@ def structured_event_list(
     event_source: str = "",
     event_type: str = "",
     is_high_value: Any = None,
+    signal_level: str = "",
     page_size: int = 100,
     limit: int = 0,
     no_delivery: bool = False,
@@ -998,7 +1033,9 @@ def structured_event_list(
     if end_dt < start_dt:
         raise RuntimeError("end 不能早于 start。")
 
+    signal_level = normalize_signal_level(signal_level)
     max_events = int(limit) if int(limit or 0) > 0 else None
+    fetch_page_size = min(page_size, 20) if signal_level else page_size
     _emit_stream(
         stream_sink,
         (
@@ -1009,14 +1046,15 @@ def structured_event_list(
     result = query_events_unified(
         keywords=[],
         minutes=max(1, int(minutes or 60)),
-        page_size=page_size,
+        page_size=fetch_page_size,
         cfg=cfg,
         event_source=event_source,
         event_type=event_type,
         is_high_value=is_high_value,
+        signal_level=signal_level,
         start_dt=start_dt,
         end_dt=end_dt,
-        max_events=max_events,
+        max_events=None if signal_level else max_events,
     )
     _emit_stream(
         stream_sink,
@@ -1024,6 +1062,14 @@ def structured_event_list(
     )
 
     compacted = [item for item in result.get("events", []) if isinstance(item, dict)]
+    compacted = filter_events_by_signal_level(compacted, signal_level)
+    filtered_total = len(compacted)
+    if signal_level and max_events is not None:
+        compacted = compacted[:max_events]
+    query = dict(result.get("query", {}) or {})
+    if signal_level:
+        query["signalLevel"] = signal_level
+        result["query"] = query
     run_time = to_iso(now_bjt())
     history["last_run_time"] = run_time
     history["last_error"] = ""
@@ -1036,10 +1082,11 @@ def structured_event_list(
             "total": int(result.get("total", 0) or 0),
             "fetched": int(result.get("fetched", 0) or 0),
             "deduped_total": int(result.get("deduped_total", 0) or 0),
+            "filtered_total": filtered_total,
             "pushed": 0,
             "reason": "no_events",
             "message": "没有查询到符合条件的事件。",
-            "query": result.get("query", {}),
+            "query": query,
             "run_time": run_time,
             "openclaw_announce_text": OPENCLAW_NO_REPLY if openclaw_output else "",
             "events": [],
@@ -1072,8 +1119,9 @@ def structured_event_list(
         "total": int(result.get("total", 0) or 0),
         "fetched": int(result.get("fetched", 0) or 0),
         "deduped_total": int(result.get("deduped_total", 0) or 0),
+        "filtered_total": filtered_total,
         "pushed": len(indexed_events),
-        "query": result.get("query", {}),
+        "query": query,
         "run_time": run_time,
         "last_push_time": batch_time if not no_delivery else "",
         "openclaw_announce_text": text if openclaw_output else "",
@@ -2494,6 +2542,7 @@ def cmd_list_events(args: argparse.Namespace) -> int:
         event_source=args.event_source,
         event_type=args.event_type,
         is_high_value=args.is_high_value,
+        signal_level=args.signal_level,
         page_size=args.page_size,
         limit=args.limit,
         no_delivery=args.no_delivery,
@@ -2704,6 +2753,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--event-source", default="", help="事件来源，模糊匹配")
     list_parser.add_argument("--event-type", default="", help="事件类型")
     list_parser.add_argument("--is-high-value", default="", help="是否高价值事件：true/false")
+    list_parser.add_argument("--signal-level", default="", help="信号等级筛选，例如 S级、A级、B级、C级；S级事件请使用这个参数，不要使用 isHighValue")
     list_parser.add_argument("--page-size", type=int, default=100, help="分页大小，最大 100")
     list_parser.add_argument("--limit", type=int, default=0, help="最多保留多少条；0 表示按接口 total 全量拉取")
     list_parser.add_argument("--no-delivery", action="store_true", help="只查询和记录历史，不标记为已推送")

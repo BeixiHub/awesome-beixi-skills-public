@@ -1,27 +1,27 @@
 {
-  "name": "openclaw-event-intelligence-tools",
+  "name": "event-intelligence-mcp",
   "version": "0.1.0",
-  "description": "OpenClaw tool plugin for deepseekdata event intelligence queries, details, summaries, and push configuration.",
-  "main": "index.js",
-  "type": "commonjs",
+  "description": "用于 deepseekdata 事件情报查询、详情、统计和推送配置的 MCP server 与中文 skill 说明。",
   "license": "UNLICENSED",
+  "bin": {
+    "event-intelligence-mcp": "./mcp-server.mjs"
+  },
+  "scripts": {
+    "mcp": "node mcp-server.mjs",
+    "list-tools": "node src/tools.cjs list-tools",
+    "check": "node --check mcp-server.mjs && node --check src/tools.cjs && env PYTHONPYCACHEPREFIX=/private/tmp/event-intelligence-mcp-pycache python3 -m py_compile scripts/push_runtime.py scripts/event_query.py scripts/runtime_config.py scripts/rule_relevance.py scripts/tool_bridge.py"
+  },
   "engines": {
     "node": ">=18"
   },
-  "scripts": {
-    "check": "node --check index.js && env PYTHONPYCACHEPREFIX=/private/tmp/event-intelligence-tool-pycache python3 -m py_compile scripts/push_runtime.py scripts/event_query.py scripts/runtime_config.py scripts/rule_relevance.py scripts/tool_bridge.py"
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0"
   },
-  "openclaw": {
-    "entry": "./index.js",
-    "tools": [
-      "event_intelligence_search_recent",
-      "event_intelligence_list_events",
-      "event_intelligence_get_detail",
-      "event_intelligence_daily_summary",
-      "event_intelligence_run_once",
-      "event_intelligence_configure_push",
-      "event_intelligence_status",
-      "event_intelligence_filter_metrics"
-    ]
-  }
+  "files": [
+    "SKILL.md",
+    "mcp-server.mjs",
+    "src/",
+    "scripts/",
+    "package.json"
+  ]
 }

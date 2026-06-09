@@ -27,7 +27,10 @@ from runtime_config import resolve_event_api_key
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
 MAX_KEYWORDS = 3
 SEMANTIC_EVENT_LIST_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/semantic/event/list"
-STRUCTURED_EVENT_LIST_URL = "https://admin.deepseekdata.com/admin-api/aireport2/event-analysis/list"
+STRUCTURED_EVENT_LIST_URL = os.getenv(
+    "EVENT_INTEL_STRUCTURED_EVENT_LIST_URL",
+    "http://115.190.254.196/admin-api/aireport2/event-analysis/structured/event/list",
+).strip()
 EVENT_LIST_URL = SEMANTIC_EVENT_LIST_URL
 DEFAULT_TIMEOUT = 60
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
@@ -608,6 +611,31 @@ def _normalize_bool_param(value: bool | str | int | None) -> str | None:
     return str(value).strip()
 
 
+def _normalize_signal_levels(value: str | list[str] | tuple[str, ...] | None) -> str:
+    if value is None:
+        return ""
+    raw_items = value if isinstance(value, (list, tuple)) else str(value).replace("，", ",").split(",")
+    aliases = {
+        "S": "S",
+        "A": "A",
+        "B": "B",
+        "C": "C",
+        "S级": "S",
+        "A级": "A",
+        "B级": "B",
+        "C级": "C",
+    }
+    normalized: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip().upper()
+        if not text:
+            continue
+        level = aliases.get(text, aliases.get(str(item or "").strip()))
+        if level and level not in normalized:
+            normalized.append(level)
+    return ",".join(normalized)
+
+
 def list_events(
     *,
     event_publish_date_start: str | datetime,
@@ -615,6 +643,7 @@ def list_events(
     event_source: str | None = None,
     event_type: str | None = None,
     is_high_value: bool | str | int | None = None,
+    signal_levels: str | list[str] | tuple[str, ...] | None = None,
     page_size: int = 100,
     max_events: int | None = None,
 ) -> dict:
@@ -642,6 +671,9 @@ def list_events(
     high_value = _normalize_bool_param(is_high_value)
     if high_value is not None:
         params["isHighValue"] = high_value
+    normalized_signal_levels = _normalize_signal_levels(signal_levels)
+    if normalized_signal_levels:
+        params["signalLevels"] = normalized_signal_levels
 
     events_by_id: dict[str, dict] = {}
     fallback_index = 0
@@ -692,6 +724,7 @@ def list_events(
             "eventSource": params.get("eventSource", ""),
             "eventType": params.get("eventType", ""),
             "isHighValue": params.get("isHighValue", ""),
+            "signalLevels": params.get("signalLevels", ""),
         },
         "events": events,
     }
